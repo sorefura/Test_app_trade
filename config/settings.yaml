@@ -1,0 +1,34 @@
+# config/settings.yaml
+
+# --- 運用設定 ---
+target_pairs:
+  - "MXN_JPY"
+interval_seconds: 60
+
+# --- ブローカー設定 ---
+broker_type: "gmo"
+enable_live_trading: true  # ★いよいよON！
+
+# スワップ補完
+manual_swap_overrides:
+  MXN_JPY:
+    long: 16.0
+    short: -25.0
+
+# --- 資金・リスク管理 ---
+max_leverage: 25.0
+min_lot_unit: 10000
+vix_threshold: 20.0
+kill_switch_margin_pct: 1.0
+
+# ★追加: ポジション数上限（GPT運用条件）
+# 初期運用では「1」に固定し、ナンピンや積み増しを禁止する
+max_positions_per_pair: 1
+
+# --- AIモデル設定 ---
+ai_models:
+  monitor: "gpt-5.1"
+  trade: "gpt-5-mini"
+  emergency: "gpt-5.1"
+current_mode: "trade"
+ai_interval_min: 60
