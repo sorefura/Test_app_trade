@@ -58,7 +58,6 @@ class GmoBrokerClient(BrokerClient):
         self.swap_overrides = swap_conf.get("overrides", {})
         
         self._check_swap_freshness()
-        self.swap_overrides = config.get("manual_swap_overrides", {})
 
     def _check_swap_freshness(self):
         """スワップ設定の鮮度を確認する"""
