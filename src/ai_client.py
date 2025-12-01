@@ -49,17 +49,11 @@ class GPTClient:
             model: 使用するモデル名 (Noneの場合はinit時のデフォルトを使用)
         """
         target_model = model if model else self.model_name
-        
-        # ★修正: プロンプト内の {pair} を動的に置換
-        # payload.market.pair には "MXN_JPY" などが入っている
         current_pair = payload.market.pair
         
         try:
-            # formatメソッドで {pair} を置換
             system_prompt = self.system_prompt_template.format(pair=current_pair)
-        except KeyError as e:
-            # プロンプトファイルに変な {} が含まれていて置換失敗した場合のガード
-            logger.warning(f"Prompt formatting failed ({e}). Using raw template.")
+        except Exception:
             system_prompt = self.system_prompt_template.replace("{pair}", current_pair)
 
         logger.info(f"Sending analysis request to AI ({target_model}) for {current_pair}. Request ID: {payload.request_id}")
