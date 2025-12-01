@@ -6,7 +6,7 @@ import logging
 import requests
 import yaml
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional, Dict, List
 
 from src.interfaces import BrokerClient
@@ -52,7 +52,26 @@ class GmoBrokerClient(BrokerClient):
         self.private_url = gmo_secrets.get('base_url_private', DEFAULT_FX_PRIVATE_URL)
         
         self.timeout = 10
+
+        swap_conf: dict = config.get("manual_swap_settings", {})
+        self.swap_updated_at = swap_conf.get("updated_at", "2000-01-01")
+        self.swap_overrides = swap_conf.get("overrides", {})
+        
+        self._check_swap_freshness()
         self.swap_overrides = config.get("manual_swap_overrides", {})
+
+    def _check_swap_freshness(self):
+        """スワップ設定の鮮度を確認する"""
+        try:
+            updated_date = datetime.strptime(self.swap_updated_at, "%Y-%m-%d")
+            days_diff = (datetime.now() - updated_date).days
+            
+            if days_diff > 14:
+                logger.critical(f"CRITICAL: Swap settings are too old ({days_diff} days). Trading may be unsafe.")
+            elif days_diff > 7:
+                logger.warning(f"WARNING: Swap settings are {days_diff} days old. Please update settings.yaml.")
+        except ValueError:
+            logger.error("Invalid date format in manual_swap_settings.updated_at")
 
     def _get_header(self, method: str, path: str, body: str = "") -> Dict[str, str]:
         if not self.api_key or not self.api_secret:
