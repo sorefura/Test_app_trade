@@ -5,15 +5,16 @@ import sys
 import yaml
 from dotenv import load_dotenv
 
-# 各コンポーネントのインポート
 from src.adapters.offline_broker import OfflineBrokerClient
-from src.adapters.gmo_broker import GmoBrokerClient # <--- 追加
+from src.adapters.gmo_broker import GmoBrokerClient
 from src.adapters.mock_news import MockNewsClient
+from src.adapters.tavily_news import TavilyNewsClient # ★追加
 from src.market_data import MarketDataFetcher
 from src.ai_client import GPTClient
 from src.risk_manager import RiskManager
 from src.strategy import StrategyEngine
 from src.execution import ExecutionService
+from src.notifier import Notifier # ★追加
 
 # ログ設定
 logging.basicConfig(
@@ -49,6 +50,8 @@ def main():
         logger.critical("OPENAI_API_KEY not found in env!")
         sys.exit(1)
 
+    notifier = Notifier()
+
     # 設定ロード
     config = load_config()
     
@@ -80,7 +83,15 @@ def main():
     
     # 2. Data Sources
     market_data = MarketDataFetcher(broker)
-    news_client = MockNewsClient() # 本番ニュース実装まではMock
+
+    # ★変更: ニュースクライアントの切り替え
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    if tavily_key:
+        logger.info("Initializing Tavily News Client (Web Search Enabled)...")
+        news_client = TavilyNewsClient()
+    else:
+        logger.warning("TAVILY_API_KEY not found. Using Mock News.")
+        news_client = MockNewsClient()
     
     # 3. AI Brain
     # 開発用: gpt-4o-mini / 本番用: gpt-4o など切り替え推奨
@@ -97,6 +108,18 @@ def main():
     logger.info(f"All components initialized. Broker Mode: {broker_type}")
     logger.info("Entering main loop.")
 
+    # ★追加: 起動カウントダウン (P0-1)
+    if config.get("enable_live_trading", False):
+        logger.warning("⚠️  LIVE TRADING IS ENABLED!  ⚠️")
+        print("Starting in 5 seconds. Press Ctrl+C to ABORT.")
+        for i in range(5, 0, -1):
+            print(f"{i}...", end=" ", flush=True)
+            time.sleep(1)
+        print("START!")
+        notifier.send("🤖 FX Bot Started (Live Mode)", level="INFO")
+    else:
+        logger.info("Running in MOCK/DRY-RUN mode.")
+
     # --- Main Loop ---
     try:
         while True:
@@ -111,10 +134,13 @@ def main():
                     # 2. 実行
                     result = execution.execute_action(decision)
 
+                    # ★追加: 異常時停止＋通知 (P0-3)
                     if result and isinstance(result, dict):
                         status = result.get("status", "")
                         if "PARTIAL_FAILURE" in status:
-                            logger.critical(f"EMERGENCY STOP: Partial failure detected for {pair}. Manual intervention required!")
+                            msg = f"🚨 EMERGENCY STOP: Partial failure detected for {pair}!"
+                            logger.critical(msg)
+                            notifier.send(msg, level="CRITICAL")
                             sys.exit(1)
                     
                 except Exception as e:
@@ -127,7 +153,9 @@ def main():
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
     except Exception as e:
-        logger.critical(f"Critical System Error: {e}", exc_info=True)
+        msg = f"Critical System Error: {e}"
+        logger.critical(msg, exc_info=True)
+        notifier.send(msg, level="CRITICAL")
 
 if __name__ == "__main__":
     main()
