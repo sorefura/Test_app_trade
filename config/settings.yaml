@@ -10,10 +10,12 @@ broker_type: "gmo"
 enable_live_trading: true  # ★いよいよON！
 
 # スワップ補完
-manual_swap_overrides:
-  MXN_JPY:
-    long: 16.0
-    short: -25.0
+manual_swap_settings:
+  updated_at: "2025-12-01"  # ★今日の日付を入れる
+  overrides:
+    MXN_JPY:
+      long: 16.0
+      short: -25.0
 
 # --- 資金・リスク管理 ---
 max_leverage: 25.0
