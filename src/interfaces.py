@@ -31,8 +31,8 @@ class BrokerClient(Protocol):
         """売買注文を実行する。"""
         ...
 
-    def close_position(self, position_id: str, amount: Optional[float] = None) -> Any:
-        """ポジションを決済する。"""
+    def close_position(self, pair: str, amount: Optional[float] = None) -> Any:
+        """指定された通貨ペアのポジションを決済する"""
         ...
 
 
