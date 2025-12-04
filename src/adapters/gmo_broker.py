@@ -100,7 +100,6 @@ class GmoBrokerClient(BrokerClient):
                 # path(=endpoint) と body="" で署名を作成する。
                 headers = self._get_header(method, endpoint, body_str)
             
-            # リクエスト実行
             if method == "GET":
                 # paramsはrequests側でURLクエリとして付与される
                 response = requests.get(url, params=params, headers=headers, timeout=self.timeout)
@@ -112,8 +111,10 @@ class GmoBrokerClient(BrokerClient):
 
             if data.get("status") != 0:
                 messages = data.get("messages", [])
-                error_msg = messages[0].get("message") if messages else "Unknown"
-                raise Exception(f"GMO API Error: {error_msg}")
+                # ★修正: message ではなく message_string を取得する
+                error_code = messages[0].get("message_code") if messages else "UNKNOWN"
+                error_msg = messages[0].get("message_string") if messages else "Unknown Error"
+                raise Exception(f"GMO API Error [{error_code}]: {error_msg}")
 
             return data.get("data")
 
@@ -125,8 +126,11 @@ class GmoBrokerClient(BrokerClient):
 
     def get_market_snapshot(self, pair: str) -> MarketSnapshot:
         data = self._request("GET", "/v1/ticker", params={"symbol": pair}, private=False)
-        item = data[0]
-        
+        item = next((d for d in data if d["symbol"] == pair), None)
+
+        if item is None:
+            raise ValueError(f"[MarketData] Ticker data for symbol '{pair}' not found in API response.")
+
         overrides = self.swap_overrides.get(pair, {})
         swap_l = float(overrides.get("long", 0.0))
         swap_s = float(overrides.get("short", 0.0))
@@ -145,23 +149,38 @@ class GmoBrokerClient(BrokerClient):
         )
 
     def get_positions(self) -> List[PositionSummary]:
-        # 全建玉取得
-        data = self._request("GET", "/v1/positionSummary", params={}, private=True)
-        positions = []
-        if not data or "list" not in data: return []
+        """
+        全保有建玉サマリーを取得
+        修正: symbol指定なしでエラーになる場合は、configのtarget_pairsをループして取得
+        """
+        all_positions = []
+        target_pairs = self.config.get("target_pairs", ["MXN_JPY"])
 
-        for item in data["list"]:
-            side = "LONG" if item["side"] == "BUY" else "SHORT"
-            amt = float(item["sumOpenSize"])
-            if amt <= 0: continue
-            
-            pnl = float(item.get("lossGain", 0.0)) + float(item.get("totalSwap", 0.0))
-            positions.append(PositionSummary(
-                pair=item["symbol"], side=side, amount=amt,
-                avg_entry_price=float(item["averagePositionRate"]),
-                current_price=0.0, unrealized_pnl=pnl, leverage=25.0
-            ))
-        return positions
+        for pair in target_pairs:
+            try:
+                # ★修正: symbolを指定してリクエスト
+                data = self._request("GET", "/v1/positionSummary", params={"symbol": pair}, private=True)
+                
+                if not data or "list" not in data:
+                    continue
+
+                for item in data["list"]:
+                    side = "LONG" if item["side"] == "BUY" else "SHORT"
+                    amt = float(item["sumOpenSize"])
+                    if amt <= 0: continue
+                    
+                    pnl = float(item.get("lossGain", 0.0)) + float(item.get("totalSwap", 0.0))
+                    all_positions.append(PositionSummary(
+                        pair=item["symbol"], side=side, amount=amt,
+                        avg_entry_price=float(item["averagePositionRate"]),
+                        current_price=0.0, unrealized_pnl=pnl, leverage=25.0
+                    ))
+            except Exception as e:
+                logger.error(f"Failed to fetch positions for {pair}: {e}")
+                # 一つのペアで失敗しても他は続ける
+                continue
+                
+        return all_positions
 
     def get_account_state(self) -> Any:
         data = self._request("GET", "/v1/account/assets", private=True)
@@ -192,13 +211,9 @@ class GmoBrokerClient(BrokerClient):
             return {"status": "MOCK_SENT", "id": "mock_id"}
 
     def close_position(self, pair: str, amount: Optional[float] = None) -> Any:
-        """
-        決済注文 (引数名変更: pair)
-        """
         logger.info(f"[GMO] Closing all positions for {pair}...")
         
         try:
-            # openPositions取得もPrivate GET (署名付き)
             data = self._request("GET", "/v1/openPositions", params={"symbol": pair}, private=True)
         except Exception as e:
             logger.error(f"Fetch failed: {e}")
@@ -229,7 +244,6 @@ class GmoBrokerClient(BrokerClient):
                 logger.error(f"Close failed {pos['positionId']}: {e}")
                 results.append({"error": str(e)})
 
-        # ダブルチェック
         if self.enable_live_trading:
             time.sleep(1.0)
             check = self._request("GET", "/v1/openPositions", params={"symbol": pair}, private=True)
@@ -238,3 +252,4 @@ class GmoBrokerClient(BrokerClient):
                 return {"status": "PARTIAL_FAILURE", "details": results}
 
         return {"status": "CLOSED_ALL", "details": results}
+    
