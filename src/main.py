@@ -123,7 +123,13 @@ def main():
     # --- Main Loop ---
     try:
         while True:
-            target_pairs = config.get("target_pairs", ["MXN_JPY"])
+            if target_pairs := config.get("target_pairs", []):
+                pass
+            else:
+                logger.critical("target pair is empty!")
+                sys.exit(1)
+                break
+            
             interval = config.get("interval_seconds", 60)
 
             for pair in target_pairs:
