@@ -82,22 +82,13 @@ class OfflineBrokerClient(BrokerClient):
 
         return {"status": "REJECTED"}
 
-    def close_position(self, position_id: str, amount: Optional[float] = None) -> Any:
+    def close_position(self, pair: str, amount: Optional[float] = None) -> Any:
         """
-        position_id (ここではペア名) に一致するポジションを全て決済する
+        pair (通貨ペア) に一致するポジションを決済
         """
-        removed_positions = [p for p in self._mock_positions if p.pair == position_id]
-        if not removed_positions:
-            logger.warning(f"Offline: No positions found for {position_id} to close.")
+        removed = [p for p in self._mock_positions if p.pair == pair]
+        if not removed:
             return {"status": "NOT_FOUND"}
-
-        # 残高更新（簡易PL計算）
-        for p in removed_positions:
-            # 簡易的にスプレッド分の損失だけ引くなど、モック挙動
-            pl = -100.0 
-            self._balance += pl
-            logger.info(f"Offline: Closed {p.side} {p.amount} units. PL: {pl}")
-
-        # リストから削除
-        self._mock_positions = [p for p in self._mock_positions if p.pair != position_id]
+        
+        self._mock_positions = [p for p in self._mock_positions if p.pair != pair]
         return {"status": "CLOSED"}

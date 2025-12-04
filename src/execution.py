@@ -50,7 +50,7 @@ class ExecutionService:
                     logger.warning("Calculated lot size is 0. Skipping order.")
 
             elif action_type == "EXIT":
-                result = self.broker.close_position(position_id=pair)
+                result = self.broker.close_position(pair=pair, amount=decision.units)
                 self._log_result(action_type, result)
 
             elif action_type == "HOLD":
