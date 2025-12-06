@@ -3,7 +3,7 @@ import logging
 import math
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from src.interfaces import BrokerClient
 from src.models import AiAction, BrokerResult
@@ -13,9 +13,13 @@ logger = logging.getLogger(__name__)
 # JSONL監査ログの設定
 jsonl_logger = logging.getLogger("AuditLog")
 jsonl_logger.setLevel(logging.INFO)
-file_handler = logging.FileHandler("execution_audit.jsonl", encoding='utf-8')
-file_handler.setFormatter(logging.Formatter('%(message)s'))
-jsonl_logger.addHandler(file_handler)
+
+# ハンドラーの二重登録防止
+if not jsonl_logger.handlers:
+    file_handler = logging.FileHandler("execution_audit.jsonl", encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter('%(message)s'))
+    jsonl_logger.addHandler(file_handler)
+
 jsonl_logger.propagate = False
 
 class ExecutionService:
@@ -41,7 +45,7 @@ class ExecutionService:
 
     def execute_action(self, decision: AiAction) -> BrokerResult:
         """
-        AIの決定に基づいてアクションを実行する。
+        AIの決定に基づいてアクションを実行し、必ず監査ログを残す。
 
         Args:
             decision (AiAction): AIの決定
@@ -92,18 +96,18 @@ class ExecutionService:
     def _log_audit(self, decision: AiAction, result: BrokerResult) -> None:
         """
         実行結果を監査ログ（JSONL）に記録する。
+        detailsはJSONオブジェクトとして埋め込む。
 
         Args:
             decision (AiAction): 元の決定
             result (BrokerResult): 結果
         """
-        
-        # 機密情報の簡易マスク (API Key等はここには来ないはずだが念のため)
+        # 機密情報の簡易マスク
         safe_details = result.details.copy()
         
-        # detailsを文字列ではなく辞書として埋め込む
+        # detailsを文字列化せず、辞書のまま保持して json.dumps に任せる
         log_entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "request_id": result.request_id or "unknown",
             "order_id": result.order_id, # Noneでもキーは残す
             "pair": decision.target_pair,
@@ -141,6 +145,5 @@ class ExecutionService:
             investable = balance * decision.suggested_leverage
             units = math.floor((investable / price) / self.min_lot_unit) * self.min_lot_unit
             return int(units)
-        except Exception as e:
-            logger.error(f"Lot calculation error: {e}")
+        except Exception:
             return 0

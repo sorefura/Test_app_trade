@@ -1,5 +1,5 @@
 # src/interfaces.py
-from typing import Protocol, List, Any, Optional
+from typing import Protocol, List, Any, Optional, Dict
 from src.models import (
     MarketSnapshot, PositionSummary, NewsItem, 
     AiAction, BrokerResult
@@ -71,8 +71,38 @@ class BrokerClient(Protocol):
 
 
 # ----------------------------------------------------
-# B. Market Data Provider Protocol
+# B. Market Data Provider Protocol & Sub-Providers
 # ----------------------------------------------------
+class VixProvider(Protocol):
+    """
+    VIX指数を提供するインターフェース。
+    取得不可またはデータが古い場合は None を返す。
+    """
+    def fetch_vix(self) -> Optional[float]:
+        """
+        VIX値を取得する。
+
+        Returns:
+            Optional[float]: VIX値。利用不可または古い場合はNone。
+        """
+        ...
+
+class SwapProvider(Protocol):
+    """
+    スワップポイントを提供するインターフェース。
+    """
+    def get_swap_points(self, pair: str) -> Dict[str, float]:
+        """
+        指定ペアのスワップポイントを取得する。
+
+        Args:
+            pair (str): 通貨ペア
+
+        Returns:
+            Dict[str, float]: スワップポイント辞書 (例: {"long": 10.5, "short": -15.0})。
+                              データがない場合は空辞書を返す。
+        """
+        ...
 
 class MarketDataProvider(Protocol):
     """
