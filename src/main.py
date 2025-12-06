@@ -151,9 +151,6 @@ def main() -> None:
 
                     # Fail-Fast: 異常系はすべて即停止
                     if result.status in ["PARTIAL_FAILURE", "ERROR", "BLOCKED_BY_SAFETY"]:
-                        # ただしHOLD中のエラーなどは除くが、BrokerResultがERRORを返すのは重大な通信エラー等
-                        if result.status == "HOLD": continue
-                        
                         # Liveモードで発注/決済失敗は致命的
                         if config.get("enable_live_trading") and os.getenv("LIVE_TRADING_ARMED") == "YES":
                             msg = f"🚨 EMERGENCY STOP: {result.status} on {pair}. Details: {result.details}"

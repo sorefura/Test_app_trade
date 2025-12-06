@@ -1,5 +1,5 @@
 # src/models.py
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
@@ -24,7 +24,7 @@ class BrokerResult(BaseModel):
     order_id: Optional[str] = Field(default=None, description="ブローカーから発行された注文ID")
     request_id: Optional[str] = Field(default=None, description="追跡用のリクエストID")
     details: Dict[str, Any] = Field(default_factory=dict, description="詳細情報やエラー内容、生レスポンス等")
-    timestamp: datetime = Field(default_factory=datetime.now, description="結果生成時刻")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="結果生成時刻 (UTC)")
 
 
 # --- AI Input Models ---
