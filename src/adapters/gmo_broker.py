@@ -20,8 +20,10 @@ DEFAULT_FX_PRIVATE_URL = 'https://forex-api.coin.z.com/private'
 
 class GmoBrokerClient(BrokerClient):
     """
-    GMOコイン FX API との通信を行うアダプタークラス。
-    署名生成、レート制限、二段ロック（Safety Lock）などの機能を提供する。
+    GMOコイン FX API アダプター (Production Safe Edition)
+    - Private POSTのリトライ完全禁止
+    - OrderId欠落時のエラー扱い
+    - レート制限 (1.1s lock)
     """
     
     def __init__(self, config: dict, secrets: dict):
@@ -34,17 +36,17 @@ class GmoBrokerClient(BrokerClient):
         """
         self.config = config
         
-        # 二段ロック確認: YAML設定と環境変数の両方が一致した場合のみ実弾取引を有効化
+        # 二段ロック確認
         yaml_live_flag = config.get("enable_live_trading", False)
         env_live_armed = os.getenv("LIVE_TRADING_ARMED", "NO") == "YES"
         
         if yaml_live_flag and env_live_armed:
             self.enable_live_trading = True
-            logger.warning("!!! LIVE TRADING FULLY ARMED & ENABLED !!! Real orders WILL be sent.")
+            logger.warning("!!! LIVE TRADING FULLY ARMED & ENABLED !!!")
         else:
             self.enable_live_trading = False
             if yaml_live_flag and not env_live_armed:
-                logger.warning("Live trading configured in YAML but BLOCKED by missing env var 'LIVE_TRADING_ARMED=YES'.")
+                logger.warning("Live trading BLOCKED by missing env var 'LIVE_TRADING_ARMED=YES'.")
             else:
                 logger.info("Live trading disabled. Orders will be MOCKED (Dry-Run).")
 
@@ -56,29 +58,10 @@ class GmoBrokerClient(BrokerClient):
         self.private_url = gmo_secrets.get('base_url_private', DEFAULT_FX_PRIVATE_URL)
         self.timeout = 10
 
-        # スワップ設定のロード
-        swap_conf: dict = config.get("manual_swap_settings", {})
-        self.swap_updated_at = swap_conf.get("updated_at", "2000-01-01")
-        self.swap_overrides = swap_conf.get("overrides", {})
-
-        # レート制限用ロック (Private API 1 req/sec)
+        # レート制限用ロック
         self._lock = threading.Lock()
         self._last_request_time = 0.0
-        self._min_interval = 1.1  # 安全マージンを含む待機時間
-        
-        self._check_swap_freshness()
-
-    def _check_swap_freshness(self) -> None:
-        """手動スワップ設定の鮮度を確認し、古い場合に警告する。"""
-        try:
-            updated_date = datetime.strptime(self.swap_updated_at, "%Y-%m-%d")
-            days_diff = (datetime.now() - updated_date).days
-            if days_diff > 14:
-                logger.critical(f"CRITICAL: Swap settings are too old ({days_diff} days).")
-            elif days_diff > 7:
-                logger.warning(f"WARNING: Swap settings are {days_diff} days old.")
-        except ValueError:
-            logger.error("Invalid date format in manual_swap_settings.updated_at")
+        self._min_interval = 1.1
 
     def _get_header(self, method: str, path: str, body: str = "") -> Dict[str, str]:
         """
@@ -120,8 +103,7 @@ class GmoBrokerClient(BrokerClient):
             now = time.time()
             elapsed = now - self._last_request_time
             if elapsed < self._min_interval:
-                sleep_time = self._min_interval - elapsed
-                time.sleep(sleep_time)
+                time.sleep(self._min_interval - elapsed)
             self._last_request_time = time.time()
 
     def _request(self, method: str, endpoint: str, params: Optional[dict] = None, private: bool = False) -> Any:
@@ -140,6 +122,9 @@ class GmoBrokerClient(BrokerClient):
         Raises:
             Exception: APIエラーまたは通信エラー
         """
+
+        is_change_request = (method != "GET" and private)
+        
         # HTTP送信直前の最終安全ガード
         if method != "GET" and private:
             if not self.enable_live_trading:
@@ -150,10 +135,12 @@ class GmoBrokerClient(BrokerClient):
         base_url = self.private_url if private else self.public_url
         url = base_url + endpoint
         
-        max_retries = 5
+        # POST変更要求ならリトライ禁止 (1回のみ)、GETならリトライOK
+        max_retries = 0 if is_change_request else 5
         backoff = 0.5
         
-        for attempt in range(max_retries):
+        # range(max_retries + 1) -> 0の場合は1回実行
+        for attempt in range(max_retries + 1):
             try:
                 if private:
                     self._wait_for_rate_limit()
@@ -183,43 +170,51 @@ class GmoBrokerClient(BrokerClient):
                 return data.get("data")
 
             except (requests.Timeout, requests.ConnectionError) as e:
-                logger.warning(f"Network Error ({attempt+1}/{max_retries}): {e}")
+                if is_change_request:
+                    # POSTでタイムアウト -> 送信可否不明 -> ERRORで即停止
+                    logger.critical(f"CRITICAL: POST Timeout to {endpoint}. Order status UNKNOWN. STOPPING.")
+                    raise # リトライせず上位へ投げる
+                logger.warning(f"Network Error ({attempt+1}/{max_retries+1}): {e}")
+
             except requests.HTTPError as e:
+                if is_change_request:
+                    # POSTで429/5xx -> 未処理の可能性高いが、安全のためリトライせず停止
+                    logger.critical(f"CRITICAL: POST HTTP Error {e.response.status_code} to {endpoint}. STOPPING.")
+                    raise
+                
+                # GETならリトライ検討
                 if e.response.status_code in [429, 500, 502, 503, 504]:
-                    logger.warning(f"HTTP Error {e.response.status_code} ({attempt+1}/{max_retries})")
+                    logger.warning(f"HTTP Error {e.response.status_code} ({attempt+1})")
                 else:
                     raise
+
             except Exception as e:
                 logger.error(f"Request Failed ({endpoint}): {e}")
                 raise
 
-            time.sleep(backoff)
-            backoff *= 2.0
+            # 最後の試行でなければ待機
+            if attempt < max_retries:
+                time.sleep(backoff)
+                backoff *= 2.0
 
         raise Exception(f"Max retries exceeded for {endpoint}")
 
+    # --- BrokerClient Impl ---
+
     def get_market_snapshot(self, pair: str) -> MarketSnapshot:
-        """市場スナップショットを取得する。"""
+        # Tickerにはスワップが含まれないため、呼び出し元(MarketDataFetcher)でSwapProviderを使って補完する前提
         data = self._request("GET", "/v1/ticker", params={"symbol": pair}, private=False)
         item = next((d for d in data if d["symbol"] == pair), None)
-
         if item is None:
-            raise ValueError(f"[MarketData] Ticker data for symbol '{pair}' not found in API response.")
-
-        overrides = self.swap_overrides.get(pair, {})
-        swap_l = float(overrides.get("long", 0.0))
-        swap_s = float(overrides.get("short", 0.0))
-        
-        if swap_l != 0.0 or swap_s != 0.0:
-            logger.info(f"[MarketData] Swap Override for {pair}: L={swap_l}/S={swap_s}")
+            raise ValueError(f"Ticker data for '{pair}' not found.")
 
         return MarketSnapshot(
             pair=item["symbol"],
             timestamp=datetime.now(timezone.utc),
             bid=float(item["bid"]),
             ask=float(item["ask"]),
-            swap_long_per_day=swap_l,
-            swap_short_per_day=swap_s,
+            swap_long_per_day=0.0, # ここでは0、MarketDataFetcherで注入
+            swap_short_per_day=0.0,
             realized_vol_24h=None
         )
 
@@ -227,19 +222,14 @@ class GmoBrokerClient(BrokerClient):
         """全ポジションを取得する。"""
         all_positions = []
         target_pairs = self.config.get("target_pairs", ["MXN_JPY"])
-
         for pair in target_pairs:
             try:
                 data = self._request("GET", "/v1/positionSummary", params={"symbol": pair}, private=True)
-                
-                if not data or "list" not in data:
-                    continue
-
+                if not data or "list" not in data: continue
                 for item in data["list"]:
                     side = "LONG" if item["side"] == "BUY" else "SHORT"
                     amt = float(item["sumOpenSize"])
                     if amt <= 0: continue
-                    
                     pnl = float(item.get("lossGain", 0.0)) + float(item.get("totalSwap", 0.0))
                     all_positions.append(PositionSummary(
                         pair=item["symbol"], side=side, amount=amt,
@@ -249,7 +239,6 @@ class GmoBrokerClient(BrokerClient):
             except Exception as e:
                 logger.error(f"Failed to fetch positions for {pair}: {e}")
                 continue
-                
         return all_positions
 
     def get_account_state(self) -> Any:
@@ -282,9 +271,8 @@ class GmoBrokerClient(BrokerClient):
                 details={
                     "pair": decision.target_pair,
                     "action": decision.action,
-                    "units": decision.units,
                     "msg": "Order skipped due to dry-run mode."
-                }
+                    }
             )
 
         params = {
@@ -297,12 +285,17 @@ class GmoBrokerClient(BrokerClient):
         try:
             logger.info(f"[GMO] Sending Order: {params}")
             res = self._request("POST", "/v1/order", params=params, private=True)
+            
+            # OrderId欠落チェック (監査性・確実性)
             order_id = str(res.get("orderId", ""))
-            return BrokerResult(
-                status="EXECUTED",
-                order_id=order_id,
-                details={"raw": res}
-            )
+            if not order_id or order_id == "None":
+                logger.critical("Order sent but NO orderId in response!")
+                return BrokerResult(
+                    status="ERROR",
+                    details={"raw": res, "error": "Missing orderId"}
+                )
+
+            return BrokerResult(status="EXECUTED", order_id=order_id, details={"raw": res})
 
         except Exception as e:
             logger.error(f"Place Order Failed: {e}")
@@ -325,25 +318,21 @@ class GmoBrokerClient(BrokerClient):
         try:
             data = self._request("GET", "/v1/openPositions", params={"symbol": pair}, private=True)
         except Exception as e:
-            return BrokerResult(status="ERROR", details={"error": f"Fetch positions failed: {e}"})
+            return BrokerResult(status="ERROR", details={"error": str(e)})
 
         pos_list = data.get("list", [])
         if not pos_list:
-            return BrokerResult(status="CLOSED_ALL", details={"msg": "No positions to close."})
+            return BrokerResult(status="CLOSED_ALL", details={"msg": "No positions"})
 
-        # Dry-Run時の偽成功防止
         if not self.enable_live_trading:
-            count = len(pos_list)
             return BrokerResult(
                 status="DRY_RUN_NOT_CLOSED",
                 details={
-                    "remaining_count": count,
-                    "msg": f"Found {count} positions but cannot close in dry-run mode."
-                }
+                    "remaining_count": len(pos_list)}
             )
 
         results = []
-        partial_error = False
+        error_occurred = False
 
         for i, pos in enumerate(pos_list):
             if i > 0: time.sleep(1.1)
@@ -359,26 +348,22 @@ class GmoBrokerClient(BrokerClient):
                 res = self._request("POST", "/v1/closeOrder", params=close_params, private=True)
                 results.append(res)
             except Exception as e:
-                logger.error(f"Close failed {pos['positionId']}: {e}")
-                results.append({"error": str(e), "positionId": pos["positionId"]})
-                partial_error = True
+                logger.critical(f"Close Failed for {pos['positionId']}: {e}")
+                results.append({"error": str(e)})
+                error_occurred = True
 
-        # 決済後の残存確認
+        if error_occurred:
+             return BrokerResult(status="PARTIAL_FAILURE", details={"results": results})
+             
+        # 最終確認 (再度GETして残存チェック)
         time.sleep(1.0)
         try:
             check = self._request("GET", "/v1/openPositions", params={"symbol": pair}, private=True)
-            remaining = check.get("list", [])
-            
-            if len(remaining) > 0:
-                logger.critical(f"⚠️ Partial Failure: {len(remaining)} positions remain for {pair}!")
-                return BrokerResult(
-                    status="PARTIAL_FAILURE",
-                    details={"results": results, "remaining_count": len(remaining)}
-                )
-        except Exception:
-            pass 
+            if len(check.get("list", [])) > 0:
+                 return BrokerResult(
+                     status="PARTIAL_FAILURE", 
+                     details={"results": results, "msg": "Positions remain after close"})
+        except:
+            pass
 
-        if partial_error:
-             return BrokerResult(status="PARTIAL_FAILURE", details={"results": results})
-             
         return BrokerResult(status="CLOSED_ALL", details={"results": results})

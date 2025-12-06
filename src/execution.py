@@ -2,6 +2,7 @@
 import logging
 import math
 import json
+import uuid
 from datetime import datetime
 from typing import Any
 from src.interfaces import BrokerClient
@@ -50,38 +51,41 @@ class ExecutionService:
         """
         action_type = decision.action
         pair = decision.target_pair
+        
+        # 監査用リクエストID生成 (decisionにあればそれを使う)
+        req_id = getattr(decision, "request_id", str(uuid.uuid4()))
 
-        logger.info(f"ExecutionService received: {action_type} for {pair}")
-        result = BrokerResult(status="ERROR")
+        logger.info(f"ExecutionService: {action_type} {pair}")
+        result = BrokerResult(status="ERROR", request_id=req_id)
 
         try:
             if action_type in ["BUY", "SELL"]:
                 lots = self._calculate_lot_size(decision)
                 if lots > 0:
                     decision.units = float(lots)
-                    logger.info(f"Calculated Lots: {lots} (Lev: {decision.suggested_leverage}x)")
-                    
                     result = self.broker.place_order(decision)
+                    # Broker側でRequestIdがセットされていない場合補完
+                    if not result.request_id: result.request_id = req_id
                 else:
-                    logger.warning("Calculated lot size is 0. Skipping order.")
-                    result = BrokerResult(status="HOLD", details={"reason": "Zero lots"})
+                    logger.warning("Lots=0. Skipping.")
+                    result = BrokerResult(status="HOLD", details={"reason": "Zero lots"}, request_id=req_id)
 
             elif action_type == "EXIT":
                 result = self.broker.close_position(pair=pair, amount=decision.units)
+                if not result.request_id: result.request_id = req_id
 
             elif action_type == "HOLD":
-                result = BrokerResult(status="HOLD", details={"rationale": decision.rationale})
-                logger.info(f"HOLD: {decision.rationale}")
+                result = BrokerResult(status="HOLD", details={"rationale": decision.rationale}, request_id=req_id)
             
             else:
-                result = BrokerResult(status="HOLD", details={"reason": "Unknown Action"})
+                result = BrokerResult(status="HOLD", details={"reason": "Unknown Action"}, request_id=req_id)
 
             self._log_audit(decision, result)
             return result
 
         except Exception as e:
-            logger.error(f"Order Execution Failed: {e}", exc_info=True)
-            err_result = BrokerResult(status="ERROR", details={"error": str(e)})
+            logger.error(f"Execution Exception: {e}", exc_info=True)
+            err_result = BrokerResult(status="ERROR", details={"error": str(e)}, request_id=req_id)
             self._log_audit(decision, err_result)
             return err_result
 
@@ -93,22 +97,30 @@ class ExecutionService:
             decision (AiAction): 元の決定
             result (BrokerResult): 結果
         """
+        
+        # 機密情報の簡易マスク (API Key等はここには来ないはずだが念のため)
         safe_details = result.details.copy()
         
+        # detailsを文字列ではなく辞書として埋め込む
         log_entry = {
             "timestamp": datetime.now().isoformat(),
+            "request_id": result.request_id or "unknown",
+            "order_id": result.order_id, # Noneでもキーは残す
             "pair": decision.target_pair,
             "action": decision.action,
             "status": result.status,
-            "order_id": result.order_id,
             "units": decision.units,
             "live_config": self.enable_live,
             "live_armed": self.live_armed,
-            "details": str(safe_details)
+            "details": safe_details
         }
         
-        jsonl_logger.info(json.dumps(log_entry, ensure_ascii=False))
-        logger.info(f"Audit Log: {decision.action} -> {result.status} (ID: {result.order_id})")
+        try:
+            json_line = json.dumps(log_entry, ensure_ascii=False)
+            jsonl_logger.info(json_line)
+            logger.info(f"Audit: {decision.action} -> {result.status} (OrdID: {result.order_id})")
+        except Exception as e:
+            logger.error(f"Audit Log Failed: {e}")
 
     def _calculate_lot_size(self, decision: AiAction) -> int:
         """
@@ -125,15 +137,10 @@ class ExecutionService:
             balance = account.get("balance", 0.0)
             snapshot = self.broker.get_market_snapshot(decision.target_pair)
             price = snapshot.ask if decision.action == "BUY" else snapshot.bid
-            
             if price <= 0: return 0
-            
-            investable_amount = balance * decision.suggested_leverage
-            raw_units = investable_amount / price
-            units = math.floor(raw_units / self.min_lot_unit) * self.min_lot_unit
-            
+            investable = balance * decision.suggested_leverage
+            units = math.floor((investable / price) / self.min_lot_unit) * self.min_lot_unit
             return int(units)
         except Exception as e:
             logger.error(f"Lot calculation error: {e}")
             return 0
-        

@@ -139,10 +139,6 @@ def main() -> None:
     try:
         while True:
             target_pairs: List[str] = config.get("target_pairs", [])
-            if not target_pairs:
-                logger.critical("target pair is empty!")
-                sys.exit(1)
-            
             interval = config.get("interval_seconds", 60)
 
             for pair in target_pairs:
@@ -153,26 +149,34 @@ def main() -> None:
                     # 2. 実行
                     result: BrokerResult = execution.execute_action(decision)
 
-                    # 異常検知と緊急停止
-                    if result.status == "PARTIAL_FAILURE":
-                        msg = f"🚨 EMERGENCY STOP: Partial failure detected for {pair}!"
-                        logger.critical(msg)
-                        notifier.send(msg, level="CRITICAL")
-                        sys.exit(1)
-                    
+                    # Fail-Fast: 異常系はすべて即停止
+                    if result.status in ["PARTIAL_FAILURE", "ERROR", "BLOCKED_BY_SAFETY"]:
+                        # ただしHOLD中のエラーなどは除くが、BrokerResultがERRORを返すのは重大な通信エラー等
+                        if result.status == "HOLD": continue
+                        
+                        # Liveモードで発注/決済失敗は致命的
+                        if config.get("enable_live_trading") and os.getenv("LIVE_TRADING_ARMED") == "YES":
+                            msg = f"🚨 EMERGENCY STOP: {result.status} on {pair}. Details: {result.details}"
+                            logger.critical(msg)
+                            notifier.send(msg, level="CRITICAL")
+                            sys.exit(1) # プロセス停止
+                        else:
+                            # Dry-Runならログ出して継続も可だが、安全重視で停止推奨
+                            logger.error(f"Dry-Run Error: {result.status}. Stopping for safety.")
+                            sys.exit(1)
+
                 except Exception as e:
-                    logger.error(f"Error in cycle for {pair}: {e}", exc_info=True)
+                    logger.critical(f"Unhandled Loop Error: {e}", exc_info=True)
+                    notifier.send(f"Critical Loop Error: {e}", level="CRITICAL")
+                    sys.exit(1)
             
-            # 待機
-            logger.info(f"Sleeping for {interval} seconds...")
             time.sleep(interval)
 
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
     except Exception as e:
-        msg = f"Critical System Error: {e}"
-        logger.critical(msg, exc_info=True)
-        notifier.send(msg, level="CRITICAL")
+        logger.critical(f"System Crash: {e}", exc_info=True)
+        notifier.send(f"System Crash: {e}", level="CRITICAL")
 
 if __name__ == "__main__":
     main()
