@@ -24,6 +24,7 @@ class GmoBrokerClient(BrokerClient):
     - Private POSTのリトライ完全禁止
     - OrderId欠落時のエラー扱い
     - レート制限 (1.1s lock)
+    - レスポンス型チェック (List対策)
     """
     
     def __init__(self, config: dict, secrets: dict):
@@ -64,23 +65,12 @@ class GmoBrokerClient(BrokerClient):
         self._min_interval = 1.1
 
     def _get_header(self, method: str, path: str, body: str = "") -> Dict[str, str]:
-        """
-        GMO API用の署名ヘッダーを生成する。
-
-        Args:
-            method (str): HTTPメソッド (GET, POST)
-            path (str): APIパス
-            body (str): リクエストボディ
-
-        Returns:
-            Dict[str, str]: 署名済みヘッダー
-        """
+        """GMO API署名生成"""
         if not self.api_key or not self.api_secret:
             raise ValueError("API Key/Secret required for Private API.")
 
         timestamp = str(int(time.time() * 1000))
         text = timestamp + method + path + body
-        
         sign = hmac.new(
             bytes(self.api_secret.encode('ascii')),
             bytes(text.encode('ascii')),
@@ -94,11 +84,10 @@ class GmoBrokerClient(BrokerClient):
         }
         if method == "POST":
             headers["Content-Type"] = "application/json"
-        
         return headers
 
     def _wait_for_rate_limit(self) -> None:
-        """レート制限を遵守するため、必要に応じてスレッドをブロックする。"""
+        """レート制限待機"""
         with self._lock:
             now = time.time()
             elapsed = now - self._last_request_time
@@ -107,26 +96,10 @@ class GmoBrokerClient(BrokerClient):
             self._last_request_time = time.time()
 
     def _request(self, method: str, endpoint: str, params: Optional[dict] = None, private: bool = False) -> Any:
-        """
-        APIリクエストを実行する。レート制限、リトライ、エラーハンドリングを含む。
-
-        Args:
-            method (str): HTTPメソッド
-            endpoint (str): APIエンドポイント
-            params (Optional[dict]): パラメータ
-            private (bool): Private APIか否か
-
-        Returns:
-            Any: レスポンスデータ
-
-        Raises:
-            Exception: APIエラーまたは通信エラー
-        """
-
+        """APIリクエスト実行（POSTリトライ禁止）"""
         is_change_request = (method != "GET" and private)
         
-        # HTTP送信直前の最終安全ガード
-        if method != "GET" and private:
+        if is_change_request:
             if not self.enable_live_trading:
                 raise RuntimeError("Safety Block: Attempted Private POST without armed live trading.")
             if os.getenv("LIVE_TRADING_ARMED") != "YES":
@@ -147,7 +120,6 @@ class GmoBrokerClient(BrokerClient):
 
                 headers = {}
                 body_str = ""
-                
                 if private:
                     if method == "POST" and params:
                         body_str = json.dumps(params)
@@ -178,11 +150,8 @@ class GmoBrokerClient(BrokerClient):
 
             except requests.HTTPError as e:
                 if is_change_request:
-                    # POSTで429/5xx -> 未処理の可能性高いが、安全のためリトライせず停止
                     logger.critical(f"CRITICAL: POST HTTP Error {e.response.status_code} to {endpoint}. STOPPING.")
                     raise
-                
-                # GETならリトライ検討
                 if e.response.status_code in [429, 500, 502, 503, 504]:
                     logger.warning(f"HTTP Error {e.response.status_code} ({attempt+1})")
                 else:
@@ -192,7 +161,6 @@ class GmoBrokerClient(BrokerClient):
                 logger.error(f"Request Failed ({endpoint}): {e}")
                 raise
 
-            # 最後の試行でなければ待機
             if attempt < max_retries:
                 time.sleep(backoff)
                 backoff *= 2.0
@@ -202,7 +170,6 @@ class GmoBrokerClient(BrokerClient):
     # --- BrokerClient Impl ---
 
     def get_market_snapshot(self, pair: str) -> MarketSnapshot:
-        # Tickerにはスワップが含まれないため、呼び出し元(MarketDataFetcher)でSwapProviderを使って補完する前提
         data = self._request("GET", "/v1/ticker", params={"symbol": pair}, private=False)
         item = next((d for d in data if d["symbol"] == pair), None)
         if item is None:
@@ -213,7 +180,7 @@ class GmoBrokerClient(BrokerClient):
             timestamp=datetime.now(timezone.utc),
             bid=float(item["bid"]),
             ask=float(item["ask"]),
-            swap_long_per_day=0.0, # ここでは0、MarketDataFetcherで注入
+            swap_long_per_day=0.0,
             swap_short_per_day=0.0,
             realized_vol_24h=None
         )
@@ -286,7 +253,14 @@ class GmoBrokerClient(BrokerClient):
             logger.info(f"[GMO] Sending Order: {params}")
             res = self._request("POST", "/v1/order", params=params, private=True)
             
-            # OrderId欠落チェック (監査性・確実性)
+            # 修正: APIレスポンスがリストの場合のハンドリング
+            if isinstance(res, list):
+                logger.warning(f"Warning: GMO API returned list instead of dict: {res}")
+                if len(res) > 0 and isinstance(res[0], dict):
+                    res = res[0]
+                else:
+                    return BrokerResult(status="ERROR", details={"raw": res, "error": "Unexpected list response"})
+
             order_id = str(res.get("orderId", ""))
             if not order_id or order_id == "None":
                 logger.critical("Order sent but NO orderId in response!")
@@ -336,14 +310,12 @@ class GmoBrokerClient(BrokerClient):
 
         for i, pos in enumerate(pos_list):
             if i > 0: time.sleep(1.1)
-            
             close_params = {
                 "executionType": "MARKET",
                 "symbol": pair,
                 "side": "SELL" if pos["side"] == "BUY" else "BUY",
                 "settlePosition": [{"positionId": pos["positionId"], "size": str(pos["size"])}]
             }
-            
             try:
                 res = self._request("POST", "/v1/closeOrder", params=close_params, private=True)
                 results.append(res)

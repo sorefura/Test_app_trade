@@ -88,17 +88,18 @@ class AiAction(BaseModel):
     """
     AIによって決定された推奨アクション。
     """
-    action: Literal["BUY", "SELL", "HOLD", "EXIT"] = Field(description="推奨アクション")
-    units: Optional[float] = Field(default=None, description="実行時に計算された最終的な発注数量")
-    target_pair: str = Field(description="対象通貨ペア")
+    action            : Literal["BUY", "SELL", "HOLD", "EXIT"] = Field(description="推奨アクション")
+    units             : Optional[float] = Field(default=None, description="実行時に計算された最終的な発注数量")
+    target_pair       : str = Field(description="対象通貨ペア")
     suggested_leverage: float = Field(description="推奨最大レバレッジ")
-    confidence: float = Field(ge=0.0, le=1.0, description="モデルの確信度 (0.0 - 1.0)")
-    risk_level: int = Field(ge=1, le=10, description="リスクレベル (1:低 - 10:高)")
+    confidence        : float = Field(ge=0.0, le=1.0, description="モデルの確信度 (0.0 - 1.0)")
+    risk_level        : int = Field(ge=1, le=10, description="リスクレベル (1:低 - 10:高)")
     expected_holding_period_days: float = Field(description="想定保有期間（日数）")
-    rationale: str = Field(description="判断根拠")
-    notes_for_human: Optional[str] = Field(default=None, description="人間へのメモ")
-    technical_bias: Optional[Literal["BULLISH", "BEARISH", "NEUTRAL"]] = Field(default=None, description="テクニカル分析のバイアス")
-    macro_bias: Optional[Literal["BULLISH", "BEARISH", "NEUTRAL"]] = Field(default=None, description="マクロ経済分析のバイアス")
+    rationale         : str = Field(description="判断根拠")
+    notes_for_human   : Optional[str] = Field(default=None, description="対ユーザへのメモ")
+    technical_bias    : Optional[Literal["BULLISH", "BEARISH", "NEUTRAL"]] = Field(default=None, description="テクニカル分析のバイアス")
+    macro_bias        : Optional[Literal["BULLISH", "BEARISH", "NEUTRAL"]] = Field(default=None, description="マクロ経済分析のバイアス")
+    request_id        : Optional[str] = Field(default=None, description="この決定に紐づくリクエストID")
 
 class AiOutputPayload(BaseModel):
     """

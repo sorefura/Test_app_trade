@@ -60,10 +60,15 @@ class ExecutionService:
         action_type = decision.action
         pair = decision.target_pair
         
-        # 監査用リクエストID生成 (decisionにあればそれを使う)
-        req_id = getattr(decision, "request_id", str(uuid.uuid4()))
+        # 監査用リクエストID取得: AiActionに含まれていればそれを使い、なければ生成
+        if decision.request_id:
+            req_id = decision.request_id
+        else:
+            req_id = str(uuid.uuid4())
+            # 後続処理のためにdecisionオブジェクトにもセットしておく（optionalなので属性追加ではない）
+            decision.request_id = req_id
 
-        logger.info(f"ExecutionService: {action_type} {pair}")
+        logger.info(f"ExecutionService: {action_type} {pair} (ReqID: {req_id})")
         result = BrokerResult(status="ERROR", request_id=req_id)
 
         try:
@@ -78,7 +83,7 @@ class ExecutionService:
                 if lots > 0:
                     decision.units = float(lots)
                     result = self.broker.place_order(decision)
-                    # Broker側でRequestIdがセットされていない場合補完
+                    # BrokerResultにリクエストIDを引き継ぐ
                     if not result.request_id: result.request_id = req_id
                 else:
                     logger.warning("Lots=0. Skipping.")

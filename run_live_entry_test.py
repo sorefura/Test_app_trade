@@ -20,7 +20,6 @@ def main() -> None:
     """
     ExecutionService経由で単発のBUY注文を実行し、監査ログの生成を確認するスクリプト。
     """
-    # 設定読み込み
     if not os.path.exists("config/settings.yaml") or not os.path.exists("config/secrets.yaml"):
         logger.error("Config or Secrets file missing.")
         return
@@ -42,36 +41,32 @@ def main() -> None:
         print("Aborted.")
         return
 
-    # 強制Liveモード設定 (YAML側)
     config["enable_live_trading"] = True
     
-    # 1. Broker構築
     try:
         broker = GmoBrokerClient(config, secrets)
     except Exception as e:
         logger.error(f"Failed to init Broker: {e}")
         return
 
-    # 2. ExecutionService構築 (ログ出力含む)
     execution = ExecutionService(broker, config)
     
-    # 3. Action生成
-    # request_id を明示的に生成して追跡しやすくする
     req_id = f"test-entry-{uuid.uuid4()}"
     
+    # テスト用: 明示的に units を指定してロット計算をバイパスする
+    test_units = float(min_lot)
+
     action = AiAction(
         action="BUY",
         target_pair=target_pair,
-        suggested_leverage=20.0, # 安全のため低レバレッジ
+        suggested_leverage=1.0, # 計算ロジックはバイパスされるため影響しないが、低めにしておく
         confidence=1.0,
         risk_level=1,
         expected_holding_period_days=0,
         rationale="Manual Live Test Entry via ExecutionService",
-        units=None # ExecutionServiceで計算させるが、失敗しないよう最小ロット計算ロジックに依存
+        units=test_units, # ★ここで強制指定
+        request_id=req_id
     )
-    # テスト用リクエストIDを動的に注入（AiActionにフィールドがない場合のフォールバックとしてExecutionServiceがハンドリングすることを期待）
-    # AiActionモデルにrequest_idフィールドを追加するのがベストだが、今回は動的属性として渡すか、
-    # ログに残ることを優先する。ExecutionService.execute_action 内で生成されるIDでも追跡は可能。
 
     try:
         print("\n--- Sending Order via ExecutionService ---")
