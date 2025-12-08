@@ -39,6 +39,7 @@ class ExecutionService:
         self.broker = broker_client
         self.min_lot_unit = config.get("min_lot_unit", 1000)
         self.enable_live = config.get("enable_live_trading", False)
+        self.account_leverage = config.get("max_leverage", 25.0)
         
         import os
         self.live_armed = os.getenv("LIVE_TRADING_ARMED", "NO")
@@ -141,9 +142,23 @@ class ExecutionService:
             balance = account.get("balance", 0.0)
             snapshot = self.broker.get_market_snapshot(decision.target_pair)
             price = snapshot.ask if decision.action == "BUY" else snapshot.bid
+            
             if price <= 0: return 0
-            investable = balance * decision.suggested_leverage
-            units = math.floor((investable / price) / self.min_lot_unit) * self.min_lot_unit
+            
+            # AIが提案するレバレッジを使用するが、口座設定(max_leverage)を超えないようにキャップする
+            effective_leverage = min(decision.suggested_leverage, self.account_leverage)
+            
+            # 投資可能額 = 口座残高 * 実効レバレッジ
+            investable = balance * effective_leverage
+            
+            # 購入可能数量 = 投資可能額 / 価格
+            raw_units = investable / price
+            
+            # 最小ロット単位で切り捨て (例: 1000通貨単位)
+            units = math.floor(raw_units / self.min_lot_unit) * self.min_lot_unit
+            
+            logger.info(f"Lot Calc: Bal={balance}, Lev={effective_leverage}x, Price={price} -> Units={units}")
             return int(units)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Lot calculation failed: {e}")
             return 0

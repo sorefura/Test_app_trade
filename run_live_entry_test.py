@@ -62,7 +62,7 @@ def main() -> None:
     action = AiAction(
         action="BUY",
         target_pair=target_pair,
-        suggested_leverage=1.0, # 安全のため低レバレッジ
+        suggested_leverage=20.0, # 安全のため低レバレッジ
         confidence=1.0,
         risk_level=1,
         expected_holding_period_days=0,
