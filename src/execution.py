@@ -39,6 +39,9 @@ class ExecutionService:
         self.broker = broker_client
         self.min_lot_unit = config.get("min_lot_unit", 1000)
         self.enable_live = config.get("enable_live_trading", False)
+        
+        # レバレッジ設定の取得 (APIから取得できないため設定値を使用)
+        # GMOコインは個人口座の場合、原則25倍固定
         self.account_leverage = config.get("max_leverage", 25.0)
         
         import os
@@ -65,7 +68,13 @@ class ExecutionService:
 
         try:
             if action_type in ["BUY", "SELL"]:
-                lots = self._calculate_lot_size(decision)
+                # 修正: 明示的にunitsが指定されている場合は計算をスキップして採用する (テスト/積立用)
+                if decision.units and decision.units > 0:
+                    lots = int(decision.units)
+                    logger.info(f"Using provided units: {lots}")
+                else:
+                    lots = self._calculate_lot_size(decision)
+                
                 if lots > 0:
                     decision.units = float(lots)
                     result = self.broker.place_order(decision)
@@ -130,6 +139,7 @@ class ExecutionService:
     def _calculate_lot_size(self, decision: AiAction) -> int:
         """
         資金管理ルールとレバレッジに基づいて発注ロット数を計算する。
+        計算式: (口座残高 * 実効レバレッジ) / 現在価格 = 購入可能通貨数
 
         Args:
             decision (AiAction): AIの決定
