@@ -26,6 +26,15 @@ class BrokerResult(BaseModel):
     details: Dict[str, Any] = Field(default_factory=dict, description="詳細情報やエラー内容、生レスポンス等")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="結果生成時刻 (UTC)")
 
+# --- Broker Specific Models ---
+
+class SymbolSpec(BaseModel):
+    """
+    通貨ペアごとの取引ルール（APIから取得）。
+    """
+    symbol: str
+    min_order_size: float = Field(description="最小発注数量 (minOpenOrderSize)")
+    size_step: float = Field(description="発注数量の刻み値 (sizeStep)")
 
 # --- AI Input Models ---
 
