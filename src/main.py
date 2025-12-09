@@ -1,23 +1,20 @@
-# src/main.py
 import time
 import logging
 import os
 import sys
 import yaml
-from typing import Dict, Any, List
 from dotenv import load_dotenv
 
 from src.adapters.offline_broker import OfflineBrokerClient
 from src.adapters.gmo_broker import GmoBrokerClient
 from src.adapters.mock_news import MockNewsClient
-from src.adapters.tavily_news import TavilyNewsClient
+from src.adapters.tavily_news import TavilyNewsClient # ★追加
 from src.market_data import MarketDataFetcher
 from src.ai_client import GPTClient
 from src.risk_manager import RiskManager
 from src.strategy import StrategyEngine
 from src.execution import ExecutionService
-from src.notifier import Notifier
-from src.models import BrokerResult
+from src.notifier import Notifier # ★追加
 
 # ログ設定
 logging.basicConfig(
@@ -30,19 +27,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Main")
 
-def load_config(path: str = "config/settings.yaml") -> Dict[str, Any]:
-    """
-    YAML設定ファイルをロードする。
-
-    Args:
-        path (str): 設定ファイルのパス。デフォルトは "config/settings.yaml"。
-
-    Returns:
-        Dict[str, Any]: ロードされた設定辞書。
-
-    Raises:
-        SystemExit: ファイルが存在しないか、読み込みに失敗した場合にプログラムを終了する。
-    """
+def load_config(path="config/settings.yaml"):
+    """YAML設定ファイルのロード"""
     if not os.path.exists(path):
         logger.error(f"Config file not found: {path}")
         sys.exit(1)
@@ -54,15 +40,11 @@ def load_config(path: str = "config/settings.yaml") -> Dict[str, Any]:
         logger.critical(f"Failed to load config: {e}")
         sys.exit(1)
 
-def main() -> None:
-    """
-    アプリケーションのメインエントリポイント。
-    コンポーネントの初期化、依存性の注入、およびメイン取引ループの実行を行う。
-    """
+def main():
     logger.info("Starting FX Swap Bot System...")
     load_dotenv()
     
-    # APIキー確認
+    # APIキー確認 (OpenAI)
     openai_api_key = os.getenv("OPENAI_API_KEY")
     if not openai_api_key:
         logger.critical("OPENAI_API_KEY not found in env!")
@@ -73,22 +55,23 @@ def main() -> None:
     # 設定ロード
     config = load_config()
     
-    # Secretsロード
+    # Secretsロード (Broker用)
     secrets_path = "config/secrets.yaml"
-    secrets: Dict[str, Any] = {}
     if os.path.exists(secrets_path):
         with open(secrets_path, "r", encoding='utf-8') as f:
             secrets = yaml.safe_load(f)
     else:
+        secrets = {}
         logger.warning("secrets.yaml not found. Private API calls may fail.")
 
-    # --- Dependency Injection ---
+    # --- Dependency Injection (依存性の注入) ---
     
-    # 1. Broker の初期化
+    # 1. Broker の切り替え
     broker_type = config.get("broker_type", "offline")
     
     if broker_type == "gmo":
         logger.info("Initializing GMO Coin Broker...")
+        # GMOキーチェック
         if not secrets.get("gmo", {}).get("api_key"):
             logger.critical("GMO API Key not found in secrets.yaml!")
             sys.exit(1)
@@ -98,32 +81,34 @@ def main() -> None:
         logger.info("Initializing Offline Broker (Mock Mode)...")
         broker = OfflineBrokerClient(config)
     
-    # 2. Data Sources の初期化
-    market_data = MarketDataFetcher(broker, config)
+    # 2. Data Sources
+    market_data = MarketDataFetcher(broker)
 
-    # ニュースクライアントの初期化
+    # ★変更: ニュースクライアントの切り替え
     tavily_key = os.getenv("TAVILY_API_KEY")
     if tavily_key:
         logger.info("Initializing Tavily News Client (Web Search Enabled)...")
-        news_client = TavilyNewsClient(api_key=tavily_key)
+        news_client = TavilyNewsClient()
     else:
         logger.warning("TAVILY_API_KEY not found. Using Mock News.")
         news_client = MockNewsClient()
     
-    # 3. AI Client の初期化
+    # 3. AI Brain
+    # 開発用: gpt-4o-mini / 本番用: gpt-4o など切り替え推奨
+    # 今回はデフォルト(gpt-4o-mini)またはコード内の指定に従う
     ai_client = GPTClient(api_key=openai_api_key)
     
-    # 4. Logic & Safety の初期化
+    # 4. Logic & Safety
     risk_manager = RiskManager(config)
     strategy = StrategyEngine(market_data, news_client, ai_client, risk_manager, config)
     
-    # 5. Execution Service の初期化
+    # 5. Execution
     execution = ExecutionService(broker, config)
 
     logger.info(f"All components initialized. Broker Mode: {broker_type}")
     logger.info("Entering main loop.")
 
-    # ライブ取引時の安全カウントダウン
+    # ★追加: 起動カウントダウン (P0-1)
     if config.get("enable_live_trading", False):
         logger.warning("⚠️  LIVE TRADING IS ENABLED!  ⚠️")
         print("Starting in 5 seconds. Press Ctrl+C to ABORT.")
@@ -138,7 +123,13 @@ def main() -> None:
     # --- Main Loop ---
     try:
         while True:
-            target_pairs: List[str] = config.get("target_pairs", [])
+            if target_pairs := config.get("target_pairs", []):
+                pass
+            else:
+                logger.critical("target pair is empty!")
+                sys.exit(1)
+                break
+            
             interval = config.get("interval_seconds", 60)
 
             for pair in target_pairs:
@@ -147,33 +138,30 @@ def main() -> None:
                     decision = strategy.run_analysis_cycle(pair)
                     
                     # 2. 実行
-                    result: BrokerResult = execution.execute_action(decision)
+                    result = execution.execute_action(decision)
 
-                    # Fail-Fast: 異常系はすべて即停止
-                    if result.status in ["PARTIAL_FAILURE", "ERROR", "BLOCKED_BY_SAFETY"]:
-                        # Liveモードで発注/決済失敗は致命的
-                        if config.get("enable_live_trading") and os.getenv("LIVE_TRADING_ARMED") == "YES":
-                            msg = f"🚨 EMERGENCY STOP: {result.status} on {pair}. Details: {result.details}"
+                    # ★追加: 異常時停止＋通知 (P0-3)
+                    if result and isinstance(result, dict):
+                        status = result.get("status", "")
+                        if "PARTIAL_FAILURE" in status:
+                            msg = f"🚨 EMERGENCY STOP: Partial failure detected for {pair}!"
                             logger.critical(msg)
                             notifier.send(msg, level="CRITICAL")
-                            sys.exit(1) # プロセス停止
-                        else:
-                            # Dry-Runならログ出して継続も可だが、安全重視で停止推奨
-                            logger.error(f"Dry-Run Error: {result.status}. Stopping for safety.")
                             sys.exit(1)
-
+                    
                 except Exception as e:
-                    logger.critical(f"Unhandled Loop Error: {e}", exc_info=True)
-                    notifier.send(f"Critical Loop Error: {e}", level="CRITICAL")
-                    sys.exit(1)
+                    logger.error(f"Error in cycle for {pair}: {e}", exc_info=True)
             
+            # 次のサイクルまで待機
+            logger.info(f"Sleeping for {interval} seconds...")
             time.sleep(interval)
 
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
     except Exception as e:
-        logger.critical(f"System Crash: {e}", exc_info=True)
-        notifier.send(f"System Crash: {e}", level="CRITICAL")
+        msg = f"Critical System Error: {e}"
+        logger.critical(msg, exc_info=True)
+        notifier.send(msg, level="CRITICAL")
 
 if __name__ == "__main__":
     main()

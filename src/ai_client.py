@@ -7,48 +7,35 @@ from pathlib import Path
 from openai import OpenAI, APIConnectionError, RateLimitError
 from pydantic import ValidationError
 
-from src.models import AiInputPayload, AiOutputPayload
+from src.models import AiInputPayload, AiOutputPayload, AiAction
 
 logger = logging.getLogger(__name__)
 
 class GPTClient:
     """
-    OpenAI APIと通信し、市場分析結果を取得するクライアント。
-    Structured Outputsを使用し、厳密な型定義に基づいたJSONレスポンスを保証する。
+    OpenAI API (GPT-5.1等) と通信し、市場分析を行うクライアントクラス。
+    Structured Outputs (Pydantic対応) を利用して、堅牢なJSONパースを実現する。
     """
 
     def __init__(self, 
                  api_key: str, 
-                 model_name: str = "gpt-5.1", 
+                 model_name: str = "gpt-4o-mini", # デフォルト
                  prompt_path: str = "config/system_prompt.txt"):
-        """
-        GPTClientを初期化する。
-
-        Args:
-            api_key (str): OpenAI APIキー
-            model_name (str): デフォルトで使用するモデル名
-            prompt_path (str): システムプロンプトファイルのパス
-        """
+        
         if not api_key:
             raise ValueError("API Key is required for GPTClient.")
             
         self.client = OpenAI(api_key=api_key)
         self.model_name = model_name
+        # プロンプトテンプレートとして読み込む
         self.system_prompt_template = self._load_system_prompt(prompt_path)
         
         logger.info(f"GPTClient initialized with default model: {self.model_name}")
 
     def _load_system_prompt(self, path: str) -> str:
-        """
-        外部ファイルからシステムプロンプトを読み込む。
-
-        Args:
-            path (str): ファイルパス
-
-        Returns:
-            str: プロンプト内容
-        """
+        """外部ファイルからシステムプロンプトを読み込む"""
         try:
+            # ★重要: UTF-8指定
             return Path(path).read_text(encoding='utf-8').strip()
         except Exception as e:
             logger.error(f"Failed to load system prompt from {path}: {e}")
@@ -57,17 +44,9 @@ class GPTClient:
     def analyze(self, payload: AiInputPayload, model: Optional[str] = None) -> AiOutputPayload:
         """
         市場データをAIに送信し、売買判断を取得する。
-
         Args:
-            payload (AiInputPayload): 分析対象データ
-            model (Optional[str]): 使用するモデル（指定がなければデフォルト）
-
-        Returns:
-            AiOutputPayload: 分析結果
-
-        Raises:
-            APIConnectionError: ネットワークエラー
-            ValidationError: レスポンス形式エラー
+            payload: AIへの入力データ
+            model: 使用するモデル名 (Noneの場合はinit時のデフォルトを使用)
         """
         target_model = model if model else self.model_name
         current_pair = payload.market.pair
@@ -106,4 +85,4 @@ class GPTClient:
         except Exception as e:
             logger.error(f"Unexpected error in AI analysis: {e}")
             raise
-    
+        

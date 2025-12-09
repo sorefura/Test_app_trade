@@ -3,30 +3,22 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional
 import uuid
 import logging
+import math
 
 from src.interfaces import BrokerClient
-from src.models import MarketSnapshot, PositionSummary, AiAction, BrokerResult
+from src.models import MarketSnapshot, PositionSummary, AiAction
 
 logger = logging.getLogger(__name__)
 
 class OfflineBrokerClient(BrokerClient):
-    """
-    外部APIを使用せず、メモリ上で取引をシミュレーションするモックブローカー。
-    """
     
     def __init__(self, config: dict):
-        """
-        モックブローカーを初期化する。
-
-        Args:
-            config (dict): 設定情報
-        """
         self._mock_positions: list[PositionSummary] = []
         self._config = config
-        self._balance = 1000000.0
+        self._balance = 1000000.0  # 口座残高保持
 
     def get_market_snapshot(self, pair: str) -> MarketSnapshot:
-        """固定の市場データを返す。"""
+        # (変更なし) 以前のコードと同じ
         return MarketSnapshot(
             pair=pair,
             timestamp=datetime.now(timezone.utc),
@@ -35,12 +27,11 @@ class OfflineBrokerClient(BrokerClient):
             realized_vol_24h=0.0035
         )
     
-    def get_positions(self) -> List[PositionSummary]:
-        """現在のモックポジションを返す。"""
+    def get_positions(self) -> list[PositionSummary]:
         return self._mock_positions
 
     def get_account_state(self) -> Any:
-        """モック口座状態を計算して返す。"""
+        # ポジションから証拠金使用率を簡易計算
         used_margin = sum([p.amount * p.current_price / 25.0 for p in self._mock_positions])
         maintenance_pct = (self._balance / used_margin) if used_margin > 0 else 9.99
 
@@ -51,44 +42,53 @@ class OfflineBrokerClient(BrokerClient):
             "margin_maintain_pct": maintenance_pct
         }
 
-    def place_order(self, action: AiAction) -> BrokerResult:
-        """注文をシミュレーションし、即座に約定させる。"""
+    def place_order(self, action: AiAction) -> Any:
+        # ExecutionServiceで計算されたロットではなく、簡易的にここでレバレッジから再計算するモック
         snapshot = self.get_market_snapshot(action.target_pair)
         price = snapshot.ask if action.action == "BUY" else snapshot.bid
         
+        # 簡易ロット計算 (Balance * Lev / Price)
         amount = int((self._balance * action.suggested_leverage) / price)
-        amount = max(amount, 1000)
+        amount = max(amount, 1000) # 最低1000
 
-        new_pos = PositionSummary(
-            pair=action.target_pair,
-            side="LONG" if action.action == "BUY" else "SHORT",
-            amount=amount,
-            avg_entry_price=price,
-            current_price=price,
-            unrealized_pnl=0.0,
-            leverage=action.suggested_leverage
-        )
-        self._mock_positions.append(new_pos)
+        if action.action == "BUY":
+            new_pos = PositionSummary(
+                pair=action.target_pair,
+                side="LONG",
+                amount=amount,
+                avg_entry_price=price,
+                current_price=price,
+                unrealized_pnl=0.0,
+                leverage=action.suggested_leverage
+            )
+            self._mock_positions.append(new_pos)
+            logger.info(f"Offline: BUY Executed. {amount} units @ {price}")
+            return {"order_id": str(uuid.uuid4()), "status": "FILLED"}
         
-        order_id = str(uuid.uuid4())
-        logger.info(f"Offline: {action.action} Executed. {amount} units @ {price}")
-        
-        return BrokerResult(
-            status="EXECUTED",
-            order_id=order_id,
-            details={"mock_price": price, "amount": amount}
-        )
+        elif action.action == "SELL":
+             # 両建て可の簡易実装
+            new_pos = PositionSummary(
+                pair=action.target_pair,
+                side="SHORT",
+                amount=amount,
+                avg_entry_price=price,
+                current_price=price,
+                unrealized_pnl=0.0,
+                leverage=action.suggested_leverage
+            )
+            self._mock_positions.append(new_pos)
+            logger.info(f"Offline: SELL Executed. {amount} units @ {price}")
+            return {"order_id": str(uuid.uuid4()), "status": "FILLED"}
 
-    def close_position(self, pair: str, amount: Optional[float] = None) -> BrokerResult:
-        """決済をシミュレーションする。"""
-        target_positions = [p for p in self._mock_positions if p.pair == pair]
-        
-        if not target_positions:
-            return BrokerResult(status="CLOSED_ALL", details={"msg": "No positions found."})
+        return {"status": "REJECTED"}
+
+    def close_position(self, pair: str, amount: Optional[float] = None) -> Any:
+        """
+        pair (通貨ペア) に一致するポジションを決済
+        """
+        removed = [p for p in self._mock_positions if p.pair == pair]
+        if not removed:
+            return {"status": "NOT_FOUND"}
         
         self._mock_positions = [p for p in self._mock_positions if p.pair != pair]
-        
-        return BrokerResult(
-            status="CLOSED_ALL", 
-            details={"closed_count": len(target_positions)}
-        )
+        return {"status": "CLOSED"}

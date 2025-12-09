@@ -8,7 +8,7 @@ target_pairs:
 interval_seconds: 60
 
 broker_type: "gmo"
-enable_live_trading: true
+enable_live_trading: false
 
 # スワップ手動補完 (GMO APIから取得できない場合の保険)
 # updated_at は定期的に更新してください
@@ -32,7 +32,7 @@ max_positions_per_pair: 1
 # 使用するAIモデル
 ai_models:
   monitor: "gpt-5-nano"
-  trade: "gpt-5.1"
+  trade: "gpt-5-mini"
   emergency: "gpt-5.1"
 current_mode: "trade"
 ai_interval_min: 60
