@@ -77,7 +77,7 @@ class StrategyEngine:
             return self._create_hold_action(pair, "Skipping AI to save cost (Time Interval)")
 
         # AI分析実行
-        news_list = self.news_client.fetch_recent_news(pair, limit=5)
+        news_list = self.news_client.fetch_recent_news(pair, limit=20)
         payload = AiInputPayload(
             request_id=str(uuid.uuid4()),
             generated_at=datetime.now(timezone.utc),
