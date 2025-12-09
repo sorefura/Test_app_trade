@@ -69,6 +69,13 @@ class BrokerClient(Protocol):
         """
         ...
 
+    def get_symbol_specs(self, pair: str) -> Optional[SymbolSpec]:
+        """
+        指定通貨ペアの取引ルール（最小発注数、刻み値）を取得する。
+        取得失敗時やキャッシュがない場合はNoneを返す。
+        """
+        ...
+
 
 # ----------------------------------------------------
 # B. Market Data Provider Protocol & Sub-Providers
