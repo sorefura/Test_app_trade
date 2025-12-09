@@ -10,8 +10,15 @@ from src.models import NewsItem
 logger = logging.getLogger(__name__)
 
 class TavilyNewsClient(NewsClient):
-    def __init__(self):
-        api_key = os.getenv("TAVILY_API_KEY")
+    """
+    Tavily APIを使用してWeb検索を行い、関連ニュースを取得するクライアント。
+    プロンプトインジェクション対策として、取得テキストに信頼境界タグを付与する。
+    """
+    
+    def __init__(self, api_key):
+        """
+        クライアントを初期化する。TAVILY_API_KEY環境変数が必要。
+        """
         if not api_key:
             raise ValueError("TAVILY_API_KEY not found")
         self.client = TavilyClient(api_key=api_key)
