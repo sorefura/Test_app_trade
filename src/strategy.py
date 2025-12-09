@@ -1,5 +1,4 @@
 # src/strategy.py
-
 import logging
 import uuid
 import time
@@ -13,7 +12,22 @@ from src.models import AiInputPayload, AiAction, RiskEnvironment
 logger = logging.getLogger(__name__)
 
 class StrategyEngine:
-    def __init__(self, market_data: MarketDataProvider, news_client: NewsClient, ai_client: GPTClient, risk_manager: RiskManager, config):
+    """
+    トレード戦略の中核ロジック。
+    市場データとニュースを収集し、AIによる分析を実行し、RiskManagerによる検証を経て最終的なアクションを決定する。
+    """
+
+    def __init__(self, market_data: MarketDataProvider, news_client: NewsClient, ai_client: GPTClient, risk_manager: RiskManager, config: dict):
+        """
+        StrategyEngineを初期化する。
+
+        Args:
+            market_data (MarketDataProvider): 市場データプロバイダ
+            news_client (NewsClient): ニュースクライアント
+            ai_client (GPTClient): AIクライアント
+            risk_manager (RiskManager): リスクマネージャー
+            config (dict): 設定情報
+        """
         self.market_data = market_data
         self.news_client = news_client
         self.ai_client = ai_client
@@ -22,7 +36,7 @@ class StrategyEngine:
         
         self.vix_threshold = config.get("vix_threshold", 20.0)
         
-        self.last_ai_call_time = {} # pair -> timestamp
+        self.last_ai_call_time = {} 
         self.min_interval_sec = config.get("ai_interval_min", 60) * 60
 
         models_config = config.get("ai_models", {})
@@ -32,6 +46,15 @@ class StrategyEngine:
         logger.info(f"StrategyEngine initialized. AI Model Mode: {current_mode} -> {self.target_model}")
 
     def run_analysis_cycle(self, pair: str) -> AiAction:
+        """
+        指定された通貨ペアに対して分析サイクル（データ収集→AI分析→リスク検証）を実行する。
+
+        Args:
+            pair (str): 通貨ペア
+
+        Returns:
+            AiAction: 決定されたアクション
+        """
         logger.info(f"=== Starting Analysis Cycle for {pair} ===")
 
         snapshot = self.market_data.fetch_market_snapshot(pair)
@@ -39,10 +62,12 @@ class StrategyEngine:
         account_state = self.market_data.fetch_account_state()
         current_vix = self.market_data.fetch_vix()
         
+        # リスクチェック（口座維持率）
         is_safe, reason = self.risk_manager.check_account_health(account_state)
         if not is_safe:
             return self._create_emergency_exit_action(pair, reason)
 
+        # 市場環境チェックとインターバル制御
         is_emergency_market = current_vix > self.vix_threshold
         last_call = self.last_ai_call_time.get(pair, 0)
         time_since_last = time.time() - last_call
@@ -51,7 +76,8 @@ class StrategyEngine:
             logger.info(f"Skipping AI: Last call was {time_since_last:.1f}s ago (Interval: {self.min_interval_sec}s)")
             return self._create_hold_action(pair, "Skipping AI to save cost (Time Interval)")
 
-        news_list = self.news_client.fetch_recent_news(pair, limit=5)
+        # AI分析実行
+        news_list = self.news_client.fetch_recent_news(pair, limit=20)
         payload = AiInputPayload(
             request_id=str(uuid.uuid4()),
             generated_at=datetime.now(timezone.utc),
@@ -64,20 +90,19 @@ class StrategyEngine:
         try:
             ai_output = self.ai_client.analyze(payload, model=self.target_model)
             decision = ai_output.decision
-            
-            # ★変更: 成功時のみ更新
             self.last_ai_call_time[pair] = time.time()
-
         except Exception as e:
             logger.error(f"AI Analysis Failed: {e}. Fallback to HOLD.")
             decision = self._create_hold_action(pair, f"AI Error Fallback: {str(e)}")
 
+        # 最終的なリスク検証
         final_decision = self.risk_manager.validate_action(decision, positions)
         
         logger.info(f"Final Decision: {final_decision.action}")
         return final_decision
 
     def _create_emergency_exit_action(self, pair: str, reason: str) -> AiAction:
+        """緊急脱出用のアクションを生成する。"""
         return AiAction(
             action="EXIT", target_pair=pair, suggested_leverage=0.0,
             confidence=1.0, risk_level=10, expected_holding_period_days=0.0,
@@ -85,6 +110,7 @@ class StrategyEngine:
         )
 
     def _create_hold_action(self, pair: str, reason: str) -> AiAction:
+        """HOLDアクションを生成する。"""
         return AiAction(
             action="HOLD", target_pair=pair, suggested_leverage=1.0,
             confidence=0.0, risk_level=1, expected_holding_period_days=0.0,
