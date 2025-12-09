@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Dict, List
 
 from src.interfaces import BrokerClient
-from src.models import MarketSnapshot, PositionSummary, AiAction, BrokerResult
+from src.models import MarketSnapshot, PositionSummary, AiAction, BrokerResult, SymbolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class GmoBrokerClient(BrokerClient):
     - OrderId欠落時のエラー扱い
     - レート制限 (1.1s lock)
     - レスポンス型チェック (List対策)
+    - シンボル仕様(minOrderSize/sizeStep)の自動取得とキャッシュ
     """
     
     def __init__(self, config: dict, secrets: dict):
@@ -37,7 +38,6 @@ class GmoBrokerClient(BrokerClient):
         """
         self.config = config
         
-        # 二段ロック確認
         yaml_live_flag = config.get("enable_live_trading", False)
         env_live_armed = os.getenv("LIVE_TRADING_ARMED", "NO") == "YES"
         
@@ -59,10 +59,14 @@ class GmoBrokerClient(BrokerClient):
         self.private_url = gmo_secrets.get('base_url_private', DEFAULT_FX_PRIVATE_URL)
         self.timeout = 10
 
-        # レート制限用ロック
         self._lock = threading.Lock()
         self._last_request_time = 0.0
         self._min_interval = 1.1
+
+        # Symbol Specs Cache
+        self._symbol_specs_cache: Dict[str, SymbolSpec] = {}
+        self._symbol_specs_last_fetch = 0.0
+        self._symbol_specs_ttl = 24 * 3600 # 24時間キャッシュ
 
     def _get_header(self, method: str, path: str, body: str = "") -> Dict[str, str]:
         """GMO API署名生成"""
@@ -108,11 +112,9 @@ class GmoBrokerClient(BrokerClient):
         base_url = self.private_url if private else self.public_url
         url = base_url + endpoint
         
-        # POST変更要求ならリトライ禁止 (1回のみ)、GETならリトライOK
         max_retries = 0 if is_change_request else 5
         backoff = 0.5
         
-        # range(max_retries + 1) -> 0の場合は1回実行
         for attempt in range(max_retries + 1):
             try:
                 if private:
@@ -143,9 +145,8 @@ class GmoBrokerClient(BrokerClient):
 
             except (requests.Timeout, requests.ConnectionError) as e:
                 if is_change_request:
-                    # POSTでタイムアウト -> 送信可否不明 -> ERRORで即停止
                     logger.critical(f"CRITICAL: POST Timeout to {endpoint}. Order status UNKNOWN. STOPPING.")
-                    raise # リトライせず上位へ投げる
+                    raise 
                 logger.warning(f"Network Error ({attempt+1}/{max_retries+1}): {e}")
 
             except requests.HTTPError as e:
@@ -168,6 +169,45 @@ class GmoBrokerClient(BrokerClient):
         raise Exception(f"Max retries exceeded for {endpoint}")
 
     # --- BrokerClient Impl ---
+
+    def get_symbol_specs(self, pair: str) -> Optional[SymbolSpec]:
+        """
+        通貨ペアの仕様（最小ロット、刻み値）を取得する。
+        メモリキャッシュ(TTL 24h)を利用し、頻繁なAPI呼び出しを防ぐ。
+        """
+        now = time.time()
+        # キャッシュが有効なら返す
+        if pair in self._symbol_specs_cache and (now - self._symbol_specs_last_fetch < self._symbol_specs_ttl):
+            return self._symbol_specs_cache[pair]
+
+        # キャッシュ切れまたは未取得ならAPIから取得
+        try:
+            # GMO Public API: /v1/symbols
+            data = self._request("GET", "/v1/symbols", private=False)
+            if not data:
+                logger.warning("Failed to fetch symbols data (empty).")
+                return None
+
+            for item in data:
+                # 必要な情報を抽出
+                sym = item.get("symbol")
+                min_size = float(item.get("minOpenOrderSize", 0))
+                step = float(item.get("sizeStep", 0))
+                
+                if sym and min_size > 0 and step > 0:
+                    self._symbol_specs_cache[sym] = SymbolSpec(
+                        symbol=sym,
+                        min_order_size=min_size,
+                        size_step=step
+                    )
+            
+            self._symbol_specs_last_fetch = now
+            return self._symbol_specs_cache.get(pair)
+
+        except Exception as e:
+            logger.error(f"Error fetching symbol specs: {e}")
+            # 古いキャッシュがあればそれを返す（安全のため）
+            return self._symbol_specs_cache.get(pair)
 
     def get_market_snapshot(self, pair: str) -> MarketSnapshot:
         data = self._request("GET", "/v1/ticker", params={"symbol": pair}, private=False)
@@ -253,7 +293,6 @@ class GmoBrokerClient(BrokerClient):
             logger.info(f"[GMO] Sending Order: {params}")
             res = self._request("POST", "/v1/order", params=params, private=True)
             
-            # 修正: APIレスポンスがリストの場合のハンドリング
             if isinstance(res, list):
                 logger.warning(f"Warning: GMO API returned list instead of dict: {res}")
                 if len(res) > 0 and isinstance(res[0], dict):
@@ -327,7 +366,6 @@ class GmoBrokerClient(BrokerClient):
         if error_occurred:
              return BrokerResult(status="PARTIAL_FAILURE", details={"results": results})
              
-        # 最終確認 (再度GETして残存チェック)
         time.sleep(1.0)
         try:
             check = self._request("GET", "/v1/openPositions", params={"symbol": pair}, private=True)
