@@ -51,7 +51,7 @@ class StrategyEngine:
             logger.info(f"Skipping AI: Last call was {time_since_last:.1f}s ago (Interval: {self.min_interval_sec}s)")
             return self._create_hold_action(pair, "Skipping AI to save cost (Time Interval)")
 
-        news_list = self.news_client.fetch_recent_news(pair, limit=5)
+        news_list = self.news_client.fetch_recent_news(pair, limit=20)
         payload = AiInputPayload(
             request_id=str(uuid.uuid4()),
             generated_at=datetime.now(timezone.utc),
