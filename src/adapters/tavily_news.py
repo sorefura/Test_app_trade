@@ -15,11 +15,10 @@ class TavilyNewsClient(NewsClient):
     プロンプトインジェクション対策として、取得テキストに信頼境界タグを付与する。
     """
     
-    def __init__(self):
+    def __init__(self, api_key):
         """
         クライアントを初期化する。TAVILY_API_KEY環境変数が必要。
         """
-        api_key = os.getenv("TAVILY_API_KEY")
         if not api_key:
             raise ValueError("TAVILY_API_KEY not found")
         self.client = TavilyClient(api_key=api_key)
