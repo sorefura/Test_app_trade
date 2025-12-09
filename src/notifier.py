@@ -8,24 +8,20 @@ logger = logging.getLogger(__name__)
 
 class Notifier:
     """
-    システム通知を管理するクラス。
-    主にDiscord Webhookを使用して、重要イベントやエラーを外部へ通知する。
+    システム通知クラス (Discord版)
+    環境変数 DISCORD_WEBHOOK_URL が設定されている場合に通知を送信する。
     """
-
     def __init__(self):
-        """
-        Notifierを初期化する。DISCORD_WEBHOOK_URL環境変数を使用する。
-        """
         self.webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 
-    def send(self, message: str, level: str = "INFO") -> None:
+    def send(self, message: str, level: str = "INFO"):
         """
-        通知を送信する。
-
+        通知を送信する
         Args:
-            message (str): 通知本文
-            level (str): 通知レベル ("INFO", "WARNING", "CRITICAL")
+            message (str): 通知内容
+            level (str): INFO, WARNING, CRITICAL
         """
+        # 1. ログに出す
         log_msg = f"[NOTIFICATION] {message}"
         if level == "CRITICAL":
             logger.critical(log_msg)
@@ -34,26 +30,21 @@ class Notifier:
         else:
             logger.info(log_msg)
 
+        # 2. Discordに送る
         if self.webhook_url:
             self._send_discord(message, level)
 
-    def _send_discord(self, text: str, level: str) -> None:
-        """
-        DiscordへWebhookリクエストを送信する。
-
-        Args:
-            text (str): メッセージ
-            level (str): レベル
-        """
+    def _send_discord(self, text: str, level: str):
         try:
-            color = 3066993 # Green
+            # 色設定 (Decimal値) Green/Yellow/Red
+            color = 3066993 
             title = "ℹ️ Info"
             
             if level == "WARNING":
-                color = 16776960 # Yellow
+                color = 16776960
                 title = "⚠️ Warning"
             elif level == "CRITICAL":
-                color = 15158332 # Red
+                color = 15158332
                 title = "🚨 CRITICAL ERROR"
 
             payload = {
@@ -71,5 +62,3 @@ class Notifier:
 
         except Exception as e:
             logger.error(f"Failed to send Discord notification: {e}")
-
-            
