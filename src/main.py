@@ -99,13 +99,13 @@ def main() -> None:
         broker = OfflineBrokerClient(config)
     
     # 2. Data Sources の初期化
-    market_data = MarketDataFetcher(broker)
+    market_data = MarketDataFetcher(broker, config)
 
     # ニュースクライアントの初期化
     tavily_key = os.getenv("TAVILY_API_KEY")
     if tavily_key:
         logger.info("Initializing Tavily News Client (Web Search Enabled)...")
-        news_client = TavilyNewsClient()
+        news_client = TavilyNewsClient(api_key=tavily_key)
     else:
         logger.warning("TAVILY_API_KEY not found. Using Mock News.")
         news_client = MockNewsClient()
