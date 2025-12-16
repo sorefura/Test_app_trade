@@ -59,13 +59,13 @@ def main() -> None:
     action = AiAction(
         action="BUY",
         target_pair=target_pair,
-        suggested_leverage=1.0, # 計算ロジックはバイパスされるため影響しないが、低めにしておく
+        suggested_leverage=1.0, 
         confidence=1.0,
         risk_level=1,
         expected_holding_period_days=0,
         rationale="Manual Live Test Entry via ExecutionService",
         units=test_units, # ★ここで強制指定
-        request_id=req_id
+        request_id=req_id # ★モデル変更に伴い追加
     )
 
     try:

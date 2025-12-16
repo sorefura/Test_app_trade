@@ -20,7 +20,9 @@ DEFAULT_FX_PRIVATE_URL = 'https://forex-api.coin.z.com/private'
 
 class GmoBrokerClient(BrokerClient):
     """
-    GMOコイン FX API アダプター (Production Safe Edition)
+    GMOコイン FX API アダプター (Production Safe Edition)。
+    
+    Features:
     - Private POSTのリトライ完全禁止
     - OrderId欠落時のエラー扱い
     - レート制限 (1.1s lock)
@@ -51,25 +53,25 @@ class GmoBrokerClient(BrokerClient):
             else:
                 logger.info("Live trading disabled. Orders will be MOCKED (Dry-Run).")
 
-        gmo_secrets = secrets.get('gmo', {})
-        self.api_key = gmo_secrets.get('api_key')
-        self.api_secret = gmo_secrets.get('api_secret')
+        gmo_secrets: dict = secrets.get('gmo', {})
+        self.api_key: str = gmo_secrets.get('api_key')
+        self.api_secret: str = gmo_secrets.get('api_secret')
         
-        self.public_url = gmo_secrets.get('base_url_public', DEFAULT_FX_PUBLIC_URL)
-        self.private_url = gmo_secrets.get('base_url_private', DEFAULT_FX_PRIVATE_URL)
-        self.timeout = 10
+        self.public_url: str = gmo_secrets.get('base_url_public', DEFAULT_FX_PUBLIC_URL)
+        self.private_url: str = gmo_secrets.get('base_url_private', DEFAULT_FX_PRIVATE_URL)
+        self.timeout: int = 10
 
         self._lock = threading.Lock()
-        self._last_request_time = 0.0
-        self._min_interval = 1.1
+        self._last_request_time: float = 0.0
+        self._min_interval: float = 1.1
 
         # Symbol Specs Cache
         self._symbol_specs_cache: Dict[str, SymbolSpec] = {}
-        self._symbol_specs_last_fetch = 0.0
-        self._symbol_specs_ttl = 24 * 3600 # 24時間キャッシュ
+        self._symbol_specs_last_fetch: float = 0.0
+        self._symbol_specs_ttl: int = 24 * 3600 # 24時間キャッシュ
 
     def _get_header(self, method: str, path: str, body: str = "") -> Dict[str, str]:
-        """GMO API署名生成"""
+        """GMO API署名を生成する"""
         if not self.api_key or not self.api_secret:
             raise ValueError("API Key/Secret required for Private API.")
 
@@ -91,7 +93,7 @@ class GmoBrokerClient(BrokerClient):
         return headers
 
     def _wait_for_rate_limit(self) -> None:
-        """レート制限待機"""
+        """レート制限を遵守するため、必要に応じてスレッドをブロックする。"""
         with self._lock:
             now = time.time()
             elapsed = now - self._last_request_time
@@ -100,7 +102,18 @@ class GmoBrokerClient(BrokerClient):
             self._last_request_time = time.time()
 
     def _request(self, method: str, endpoint: str, params: Optional[dict] = None, private: bool = False) -> Any:
-        """APIリクエスト実行（POSTリトライ禁止）"""
+        """
+        APIリクエストを実行する（POSTリトライ禁止）。
+
+        Args:
+            method (str): HTTPメソッド
+            endpoint (str): APIエンドポイント
+            params (Optional[dict]): パラメータ
+            private (bool): Private APIか否か
+
+        Returns:
+            Any: レスポンスデータ
+        """
         is_change_request = (method != "GET" and private)
         
         if is_change_request:
@@ -174,6 +187,12 @@ class GmoBrokerClient(BrokerClient):
         """
         通貨ペアの仕様（最小ロット、刻み値）を取得する。
         メモリキャッシュ(TTL 24h)を利用し、頻繁なAPI呼び出しを防ぐ。
+
+        Args:
+            pair (str): 通貨ペア
+
+        Returns:
+            Optional[SymbolSpec]: シンボル仕様
         """
         now = time.time()
         # キャッシュが有効なら返す
@@ -189,7 +208,6 @@ class GmoBrokerClient(BrokerClient):
                 return None
 
             for item in data:
-                # 必要な情報を抽出
                 sym = item.get("symbol")
                 min_size = float(item.get("minOpenOrderSize", 0))
                 step = float(item.get("sizeStep", 0))
@@ -206,10 +224,11 @@ class GmoBrokerClient(BrokerClient):
 
         except Exception as e:
             logger.error(f"Error fetching symbol specs: {e}")
-            # 古いキャッシュがあればそれを返す（安全のため）
+            # キャッシュがあれば古くても返す
             return self._symbol_specs_cache.get(pair)
 
     def get_market_snapshot(self, pair: str) -> MarketSnapshot:
+        """市場スナップショットを取得する"""
         data = self._request("GET", "/v1/ticker", params={"symbol": pair}, private=False)
         item = next((d for d in data if d["symbol"] == pair), None)
         if item is None:
@@ -226,7 +245,7 @@ class GmoBrokerClient(BrokerClient):
         )
 
     def get_positions(self) -> List[PositionSummary]:
-        """全ポジションを取得する。"""
+        """全ポジションを取得する"""
         all_positions = []
         target_pairs = self.config.get("target_pairs", ["MXN_JPY"])
         for pair in target_pairs:
@@ -249,7 +268,7 @@ class GmoBrokerClient(BrokerClient):
         return all_positions
 
     def get_account_state(self) -> Any:
-        """口座状態を取得する。"""
+        """口座状態を取得する"""
         data = self._request("GET", "/v1/account/assets", private=True)
         equity = float(data.get("equity", data.get("netAssets", 0.0)))
         used = float(data.get("margin", 0.0))

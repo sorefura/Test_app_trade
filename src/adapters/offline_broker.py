@@ -5,7 +5,7 @@ import uuid
 import logging
 
 from src.interfaces import BrokerClient
-from src.models import MarketSnapshot, PositionSummary, AiAction, BrokerResult
+from src.models import MarketSnapshot, PositionSummary, AiAction, BrokerResult, SymbolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,25 @@ class OfflineBrokerClient(BrokerClient):
         self._config = config
         self._balance = 1000000.0
 
+    def get_symbol_specs(self, pair: str) -> Optional[SymbolSpec]:
+        """
+        モック用のシンボル仕様を返す。
+
+        Args:
+            pair (str): 通貨ペア
+
+        Returns:
+            Optional[SymbolSpec]: モック仕様
+        """
+        if pair == "USD_JPY":
+            return SymbolSpec(symbol="USD_JPY", min_order_size=100, size_step=1)
+        elif pair == "MXN_JPY":
+            return SymbolSpec(symbol="MXN_JPY", min_order_size=10000, size_step=10)
+        
+        return SymbolSpec(symbol=pair, min_order_size=1000, size_step=1000)
+
     def get_market_snapshot(self, pair: str) -> MarketSnapshot:
-        """固定の市場データを返す。"""
+        """固定の市場データを返す"""
         return MarketSnapshot(
             pair=pair,
             timestamp=datetime.now(timezone.utc),
@@ -36,11 +53,11 @@ class OfflineBrokerClient(BrokerClient):
         )
     
     def get_positions(self) -> List[PositionSummary]:
-        """現在のモックポジションを返す。"""
+        """現在のモックポジションを返す"""
         return self._mock_positions
 
     def get_account_state(self) -> Any:
-        """モック口座状態を計算して返す。"""
+        """モック口座状態を計算して返す"""
         used_margin = sum([p.amount * p.current_price / 25.0 for p in self._mock_positions])
         maintenance_pct = (self._balance / used_margin) if used_margin > 0 else 9.99
 
@@ -52,7 +69,7 @@ class OfflineBrokerClient(BrokerClient):
         }
 
     def place_order(self, action: AiAction) -> BrokerResult:
-        """注文をシミュレーションし、即座に約定させる。"""
+        """注文をシミュレーションし、即座に約定させる"""
         snapshot = self.get_market_snapshot(action.target_pair)
         price = snapshot.ask if action.action == "BUY" else snapshot.bid
         
@@ -80,7 +97,7 @@ class OfflineBrokerClient(BrokerClient):
         )
 
     def close_position(self, pair: str, amount: Optional[float] = None) -> BrokerResult:
-        """決済をシミュレーションする。"""
+        """決済をシミュレーションする"""
         target_positions = [p for p in self._mock_positions if p.pair == pair]
         
         if not target_positions:
@@ -92,3 +109,4 @@ class OfflineBrokerClient(BrokerClient):
             status="CLOSED_ALL", 
             details={"closed_count": len(target_positions)}
         )
+    

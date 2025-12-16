@@ -1,19 +1,17 @@
 # src/adapters/swap_provider.py
 import logging
 import time
-import requests
 import json
+import os
+import requests
 from typing import Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from src.interfaces import SwapProvider
 
 logger = logging.getLogger(__name__)
 
 class ManualSwapProvider(SwapProvider):
-    """
-    設定ファイル(settings.yaml)の手動設定値を返すプロバイダー。
-    最後の砦（Last Resort）。
-    """
+    """設定ファイル依存のフォールバック用プロバイダー。"""
     def __init__(self, config: dict):
         self.config = config
         swap_conf = config.get("manual_swap_settings", {})
@@ -21,20 +19,14 @@ class ManualSwapProvider(SwapProvider):
         self.updated_at = swap_conf.get("updated_at", "2000-01-01")
 
     def get_swap_points(self, pair: str) -> Dict[str, float]:
-        """
-        手動設定のスワップポイントを取得する。
-        設定が14日以上古い場合は警告を出す。
-        """
-        # データの鮮度チェック
+        """設定ファイルからスワップポイントを取得"""
         try:
-            updated_date = datetime.strptime(str(self.updated_at), "%Y-%m-%d")
-            days_diff = (datetime.now() - updated_date).days
-            if days_diff > 14:
-                logger.warning(f"Manual Swap settings are OLD ({days_diff} days). Using with caution.")
-                # 安全のため空を返す選択肢もあるが、Last Resortなので警告に留める
+            updated_date = datetime.strptime(self.updated_at, "%Y-%m-%d")
+            if (datetime.now() - updated_date).days > 14:
+                return {} # 古すぎるデータは危険
         except ValueError:
-            logger.error("Invalid date format in manual_swap_settings")
-
+            return {}
+        
         data = self.overrides.get(pair)
         if data:
             return {"long": float(data.get("long", 0.0)), "short": float(data.get("short", 0.0))}
@@ -42,65 +34,85 @@ class ManualSwapProvider(SwapProvider):
 
 class HttpJsonSwapProvider(SwapProvider):
     """
-    外部のJSONエンドポイントからスワップ情報を取得するプロバイダー。
-    想定フォーマット: {"MXN_JPY": {"long": 15.0, "short": -20.0}, ...}
+    外部のJSONソースからスワップポイントを取得し、ローカルにキャッシュするプロバイダー。
     """
-    def __init__(self, config: dict):
-        self.url = config.get("swap_source_url") # settings.yamlに追加が必要
-        self.cache: Dict[str, Dict[str, float]] = {}
-        self.last_fetch = 0.0
-        self.ttl = 3600 # 1時間
+    def __init__(self, source_url: str = None):
+        # デフォルトはGithub GistなどのRaw URLを想定（環境変数で上書き可）
+        self.source_url = source_url or os.getenv("SWAP_JSON_URL")
+        self.cache_file = "swap_cache.json"
+        self._mem_cache = {}
+        
+    def _fetch_and_cache(self):
+        if not self.source_url:
+            return
+            
+        try:
+            resp = requests.get(self.source_url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            # データ検証: 必須キーがあるか
+            if "updated_at" in data and "swaps" in data:
+                with open(self.cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f)
+                self._mem_cache = data
+                logger.info("Fetched and cached swap points.")
+        except Exception as e:
+            logger.warning(f"Failed to fetch swap points: {e}")
+
+    def _load_cache(self) -> dict:
+        if self._mem_cache: return self._mem_cache
+        
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    self._mem_cache = json.load(f)
+                    return self._mem_cache
+            except:
+                pass
+        return {}
 
     def get_swap_points(self, pair: str) -> Dict[str, float]:
-        """
-        外部APIからスワップポイントを取得する。
-        """
-        if not self.url:
+        """外部JSONまたはキャッシュからスワップポイントを取得"""
+        data = self._load_cache()
+        
+        # 鮮度チェックと更新
+        last_update_str = data.get("updated_at", "2000-01-01")
+        try:
+            last_update = datetime.strptime(last_update_str, "%Y-%m-%d")
+            if (datetime.now() - last_update).days > 1:
+                self._fetch_and_cache()
+                data = self._load_cache()
+        except:
+            self._fetch_and_cache()
+        
+        # 再度鮮度チェック（7日以上古いなら無効）
+        last_update_str = data.get("updated_at", "2000-01-01")
+        try:
+            last_update = datetime.strptime(last_update_str, "%Y-%m-%d")
+            if (datetime.now() - last_update).days > 7:
+                logger.warning("Swap cache is stale (>7 days). Returning empty.")
+                return {} 
+        except:
             return {}
 
-        if time.time() - self.last_fetch > self.ttl:
-            self._fetch_remote()
-
-        return self.cache.get(pair, {})
-
-    def _fetch_remote(self):
-        try:
-            resp = requests.get(self.url, timeout=5)
-            if resp.status_code == 200:
-                self.cache = resp.json()
-                self.last_fetch = time.time()
-                logger.info(f"Fetched remote swap data from {self.url}")
-            else:
-                logger.warning(f"Remote swap fetch failed: {resp.status_code}")
-        except Exception as e:
-            logger.warning(f"Remote swap fetch error: {e}")
+        swaps = data.get("swaps", {}).get(pair)
+        if swaps:
+            return {"long": float(swaps.get("long", 0)), "short": float(swaps.get("short", 0))}
+        return {}
 
 class AggregatedSwapProvider(SwapProvider):
     """
-    複数のソースを順に試行し、スワップポイントを解決するプロバイダー。
-    優先順位:
-    1. HTTP JSON Source (もし設定にあれば)
-    2. Manual Settings (settings.yaml)
+    複数のプロバイダーを集約し、最適なスワップポイントを提供するクラス。
     """
     def __init__(self, config: dict):
-        self.providers = []
-        
-        # URL設定があればHTTPプロバイダーを追加
-        if config.get("swap_source_url"):
-            self.providers.append(HttpJsonSwapProvider(config))
-            
-        # 常にManualプロバイダーは追加（フォールバック）
-        self.providers.append(ManualSwapProvider(config))
+        self.manual_provider = ManualSwapProvider(config)
+        self.http_provider = HttpJsonSwapProvider()
 
     def get_swap_points(self, pair: str) -> Dict[str, float]:
         """
-        登録されたプロバイダーを順に検索し、最初に見つかった有効なデータを返す。
+        スワップポイントを取得する。HTTP取得を優先し、失敗時はManualにフォールバック。
         """
-        for provider in self.providers:
-            data = provider.get_swap_points(pair)
-            # 有効なデータ（long/shortが含まれる）なら採用
-            if data and "long" in data and "short" in data:
-                return data
-        
-        logger.warning(f"No swap data found for {pair} in any provider.")
-        return {}
+        res = self.http_provider.get_swap_points(pair)
+        if res: return res
+        return self.manual_provider.get_swap_points(pair)
