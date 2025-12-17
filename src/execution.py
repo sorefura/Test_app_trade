@@ -2,6 +2,7 @@
 import logging
 import math
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -14,7 +15,6 @@ logger = logging.getLogger(__name__)
 jsonl_logger = logging.getLogger("AuditLog")
 jsonl_logger.setLevel(logging.INFO)
 
-# ハンドラーの二重登録防止
 if not jsonl_logger.handlers:
     file_handler = logging.FileHandler("execution_audit.jsonl", encoding='utf-8')
     file_handler.setFormatter(logging.Formatter('%(message)s'))
@@ -37,14 +37,12 @@ class ExecutionService:
             config (dict): 設定情報
         """
         self.broker = broker_client
-        self.min_lot_unit = config.get("min_lot_unit", 1000)
         self.enable_live = config.get("enable_live_trading", False)
-        
+        # 設定値はフォールバック用。基本はAPI取得値を優先
+        self.fallback_min_lot = config.get("min_lot_unit", 1000)
         # レバレッジ設定の取得 (APIから取得できないため設定値を使用)
-        # GMOコインは個人口座の場合、原則25倍固定
         self.account_leverage = config.get("max_leverage", 25.0)
         
-        import os
         self.live_armed = os.getenv("LIVE_TRADING_ARMED", "NO")
 
     def execute_action(self, decision: AiAction) -> BrokerResult:
@@ -60,12 +58,12 @@ class ExecutionService:
         action_type = decision.action
         pair = decision.target_pair
         
-        # 監査用リクエストID取得: AiActionに含まれていればそれを使い、なければ生成
+        # 監査用リクエストID生成: AiActionに含まれていればそれを使い、なければ生成
         if decision.request_id:
             req_id = decision.request_id
         else:
             req_id = str(uuid.uuid4())
-            # 後続処理のためにdecisionオブジェクトにもセットしておく（optionalなので属性追加ではない）
+            # 後続処理のためにセットしておく
             decision.request_id = req_id
 
         logger.info(f"ExecutionService: {action_type} {pair} (ReqID: {req_id})")
@@ -73,9 +71,14 @@ class ExecutionService:
 
         try:
             if action_type in ["BUY", "SELL"]:
+                # ロット計算または指定値の検証
                 # 修正: 明示的にunitsが指定されている場合は計算をスキップして採用する (テスト/積立用)
                 if decision.units and decision.units > 0:
-                    lots = int(decision.units)
+                    # 指定値がある場合でも、シンボル仕様に適合するか検証
+                    validated_units = self._validate_and_adjust_units(decision.target_pair, decision.units)
+                    if validated_units != decision.units:
+                        logger.warning(f"Specified units {decision.units} adjusted to {validated_units} (or 0 if invalid)")
+                    lots = int(validated_units)
                     logger.info(f"Using provided units: {lots}")
                 else:
                     lots = self._calculate_lot_size(decision)
@@ -83,11 +86,12 @@ class ExecutionService:
                 if lots > 0:
                     decision.units = float(lots)
                     result = self.broker.place_order(decision)
-                    # BrokerResultにリクエストIDを引き継ぐ
+                    # Broker側でRequestIdがセットされていない場合補完
                     if not result.request_id: result.request_id = req_id
                 else:
-                    logger.warning("Lots=0. Skipping.")
-                    result = BrokerResult(status="HOLD", details={"reason": "Zero lots"}, request_id=req_id)
+                    # ロットが0になるのは「資金不足」か「最小単位未満」のどちらか。HOLD扱い。
+                    logger.warning("Lots=0 (Below min size or funds). Skipping.")
+                    result = BrokerResult(status="HOLD", details={"reason": "Zero lots (below min or insufficient funds)"}, request_id=req_id)
 
             elif action_type == "EXIT":
                 result = self.broker.close_position(pair=pair, amount=decision.units)
@@ -97,7 +101,7 @@ class ExecutionService:
                 result = BrokerResult(status="HOLD", details={"rationale": decision.rationale}, request_id=req_id)
             
             else:
-                result = BrokerResult(status="HOLD", details={"reason": "Unknown Action"}, request_id=req_id)
+                result = BrokerResult(status="HOLD", details={"reason": f"Unknown Action {action_type}"}, request_id=req_id)
 
             self._log_audit(decision, result)
             return result
@@ -111,20 +115,17 @@ class ExecutionService:
     def _log_audit(self, decision: AiAction, result: BrokerResult) -> None:
         """
         実行結果を監査ログ（JSONL）に記録する。
-        detailsはJSONオブジェクトとして埋め込む。
 
         Args:
             decision (AiAction): 元の決定
             result (BrokerResult): 結果
         """
-        # 機密情報の簡易マスク
         safe_details = result.details.copy()
         
-        # detailsを文字列化せず、辞書のまま保持して json.dumps に任せる
         log_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "request_id": result.request_id or "unknown",
-            "order_id": result.order_id, # Noneでもキーは残す
+            "order_id": result.order_id,
             "pair": decision.target_pair,
             "action": decision.action,
             "status": result.status,
@@ -141,10 +142,50 @@ class ExecutionService:
         except Exception as e:
             logger.error(f"Audit Log Failed: {e}")
 
+    def _get_specs_or_default(self, pair: str):
+        """
+        APIからシンボル仕様を取得、失敗時はデフォルト値を返す。
+
+        Args:
+            pair (str): 通貨ペア
+
+        Returns:
+            Tuple[float, float]: (min_order_size, size_step)
+        """
+        specs = self.broker.get_symbol_specs(pair)
+        if specs:
+            return specs.min_order_size, specs.size_step
+        else:
+            logger.warning(f"Could not fetch symbol specs for {pair}. Using fallback min={self.fallback_min_lot}.")
+            return self.fallback_min_lot, self.fallback_min_lot # stepも同値と仮定
+
+    def _validate_and_adjust_units(self, pair: str, raw_units: float) -> int:
+        """
+        指定された数量がシンボル仕様（最小ロット、刻み値）に適合するか確認し、
+        適合しない場合は 0 を返す（勝手に丸めない方針）。
+        ただし、stepによる微小な丸め（例: 10005 -> 10000）は許容するが、min未満はNGとする。
+
+        Args:
+            pair (str): 通貨ペア
+            raw_units (float): 計算された生の通貨数
+
+        Returns:
+            int: 調整後のロット数。不適合なら0。
+        """
+        min_size, step = self._get_specs_or_default(pair)
+        
+        # 刻み値で丸め（切り捨て）
+        units = math.floor(raw_units / step) * step
+        
+        if units < min_size:
+            logger.warning(f"Calculated units {units} is below min order size {min_size} for {pair}.")
+            return 0
+            
+        return int(units)
+
     def _calculate_lot_size(self, decision: AiAction) -> int:
         """
-        資金管理ルールとレバレッジに基づいて発注ロット数を計算する。
-        計算式: (口座残高 * 実効レバレッジ) / 現在価格 = 購入可能通貨数
+        資金管理ルールとシンボル仕様に基づいて発注ロット数を計算する。
 
         Args:
             decision (AiAction): AIの決定
@@ -169,11 +210,9 @@ class ExecutionService:
             # 購入可能数量 = 投資可能額 / 価格
             raw_units = investable / price
             
-            # 最小ロット単位で切り捨て (例: 1000通貨単位)
-            units = math.floor(raw_units / self.min_lot_unit) * self.min_lot_unit
-            
-            logger.info(f"Lot Calc: Bal={balance}, Lev={effective_leverage}x, Price={price} -> Units={units}")
-            return int(units)
+            # シンボル仕様に基づく調整
+            return self._validate_and_adjust_units(decision.target_pair, raw_units)
+
         except Exception as e:
             logger.error(f"Lot calculation failed: {e}")
             return 0

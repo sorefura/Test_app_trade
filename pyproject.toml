@@ -1,7 +1,7 @@
 [project]
 name = "fx-swap-bot"
-version = "1.0.0"  # ★ v1.0.0 正式リリース
-description = "AI-powered FX Swap Arbitrage Bot (Production Ready)"
+version = "1.0.0"
+description = "AI-powered FX Swap Arbitrage Bot (Production Safety Edition)"
 requires-python = ">=3.14"
 dependencies = [
     "pydantic>=2.10",
@@ -13,3 +13,6 @@ dependencies = [
     "requests>=2.31",
     "tavily-python>=0.3.0"
 ]
+
+[tool.setuptools]
+packages = ["src"]

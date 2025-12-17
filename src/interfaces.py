@@ -2,7 +2,7 @@
 from typing import Protocol, List, Any, Optional, Dict
 from src.models import (
     MarketSnapshot, PositionSummary, NewsItem, 
-    AiAction, BrokerResult
+    AiAction, BrokerResult, SymbolSpec
 )
 
 # ----------------------------------------------------
@@ -68,11 +68,24 @@ class BrokerClient(Protocol):
             BrokerResult: 決済結果
         """
         ...
+    
+    def get_symbol_specs(self, pair: str) -> Optional[SymbolSpec]:
+        """
+        指定通貨ペアの取引ルール（最小発注数、刻み値）を取得する。
+        
+        Args:
+            pair (str): 通貨ペア
+
+        Returns:
+            Optional[SymbolSpec]: 取引ルール。取得失敗時やキャッシュがない場合はNone。
+        """
+        ...
 
 
 # ----------------------------------------------------
-# B. Market Data Provider Protocol & Sub-Providers
+# B. Market Data Provider & Sub-Providers
 # ----------------------------------------------------
+
 class VixProvider(Protocol):
     """
     VIX指数を提供するインターフェース。
