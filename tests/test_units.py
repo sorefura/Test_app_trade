@@ -67,6 +67,9 @@ class TestFxBotUnits(unittest.TestCase):
         self.mock_market_data.fetch_market_snapshot.return_value = self.snapshot
         self.mock_broker.get_market_snapshot.return_value = self.snapshot
 
+        # 5. SymbolSpec: デフォルトはNone（フォールバックテスト用）
+        self.mock_broker.get_symbol_specs.return_value = None
+
     # --- Test Case 1: AIコスト削減ロジック ---
     def test_strategy_skip_ai_call(self):
         """

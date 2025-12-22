@@ -3,7 +3,7 @@ import logging
 from typing import Any, List
 from src.interfaces import MarketDataProvider, BrokerClient, VixProvider, SwapProvider
 from src.models import MarketSnapshot, PositionSummary
-from src.adapters.vix_provider import FixedVixProvider
+from src.adapters.vix_provider import FixedVixProvider, YahooVixProvider
 from src.adapters.swap_provider import AggregatedSwapProvider
 
 logger = logging.getLogger(__name__)
@@ -24,9 +24,15 @@ class MarketDataFetcher(MarketDataProvider):
         """
         self._broker_client = broker_client
         
-        # Provider初期化 (DIコンテナがあればそちらでやるべきだが、簡易的にここで生成)
-        # VIXプロバイダー: デフォルトは安全側に倒して固定値25.0を使用
-        self._vix_provider: VixProvider = FixedVixProvider(25.0)
+        # VIXプロバイダーの初期化 (P1)
+        if config.get('use_web_vix', False):
+            logger.info("Using YahooVixProvider for VIX data.")
+            self._vix_provider: VixProvider = YahooVixProvider()
+        else:
+            fixed_vix = config.get('fixed_vix_value', 25.0)
+            logger.info(f"Using FixedVixProvider with value: {fixed_vix}")
+            self._vix_provider: VixProvider = FixedVixProvider(fixed_vix)
+
         # スワッププロバイダー: 設定ファイルと外部ソースを集約するプロバイダーを使用
         self._swap_provider: SwapProvider = AggregatedSwapProvider(config)
 
@@ -72,11 +78,15 @@ class MarketDataFetcher(MarketDataProvider):
         Returns:
             float: VIX指数。取得失敗時は 99.9 を返す。
         """
-        val = self._vix_provider.fetch_vix()
-        if val is None:
-            logger.warning("VIX fetch failed. Returning safe fallback (high VIX).")
+        try:
+            val = self._vix_provider.fetch_vix()
+            if val is None:
+                logger.warning("VIX fetch returned None. Returning safe fallback (99.9).")
+                return 99.9 # 確実にRisk Offにする値
+            return val
+        except Exception as e:
+            logger.error(f"VIX fetch failed with exception: {e}. Returning safe fallback (99.9).")
             return 99.9 # 確実にRisk Offにする値
-        return val
 
     def fetch_positions(self) -> List[PositionSummary]:
         """

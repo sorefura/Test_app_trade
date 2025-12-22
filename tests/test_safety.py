@@ -11,8 +11,8 @@ from src.risk_manager import RiskManager
 from src.execution import ExecutionService
 
 # インポート整合性チェック用
-from src.adapters.vix_provider import FixedVixProvider, WebVixProvider
-from src.adapters.swap_provider import ManualSwapProvider, HttpJsonSwapProvider
+from src.adapters.vix_provider import FixedVixProvider, YahooVixProvider
+from src.adapters.swap_provider import ManualSwapProvider, HttpJsonSwapProvider, AggregatedSwapProvider
 
 class TestProductionSafety(unittest.TestCase):
     """
@@ -24,7 +24,10 @@ class TestProductionSafety(unittest.TestCase):
             "enable_live_trading": True,
             "target_pairs": ["USD_JPY"],
             "max_positions_per_pair": 1,
-            "min_lot_unit": 1000 # フォールバック用
+            "min_lot_unit": 1000, # フォールバック用
+            "manual_swap_points": {
+                "USD/JPY": {"buy": 100.0, "sell": -110.0}
+            }
         }
         self.secrets = {"gmo": {"api_key": "dummy", "api_secret": "dummy"}}
 
@@ -33,13 +36,48 @@ class TestProductionSafety(unittest.TestCase):
     # ----------------------------------------------------------------
     def test_providers_structure(self) -> None:
         """VixProvider/SwapProviderが正常に動作し、失敗時に安全側(None/{})を返すか検証"""
-        vix = WebVixProvider()
+        vix = YahooVixProvider()
         with patch('requests.get') as mock_get:
-            mock_get.side_effect = Exception("Network Down")
+            mock_get.side_effect = requests.exceptions.RequestException("Network Down")
             self.assertIsNone(vix.fetch_vix(), "Fetch失敗時はNoneを返すべき")
 
-        swap = HttpJsonSwapProvider()
-        self.assertEqual(swap.get_swap_points("USD_JPY"), {}, "URL未設定/失敗時は空辞書")
+        swap = HttpJsonSwapProvider({})
+        self.assertIsNone(swap.get_swap_points("USD_JPY"), "URL未設定/失敗時はNone")
+
+    def test_swap_provider_fallback_on_stale_data(self) -> None:
+        """[P0] HttpJsonSwapProviderがステールデータ(None)を返し、新しい設定形式でフォールバックするか検証"""
+        # HttpJsonプロバイダーがNoneを返すようにモック
+        with patch('src.adapters.swap_provider.HttpJsonSwapProvider.get_swap_points', return_value=None):
+            
+            # 'manual_swap_points' を持つ設定で Aggregated プロバイダーを初期化
+            swap_provider = AggregatedSwapProvider(self.config)
+            swaps = swap_provider.get_swap_points("USD/JPY")
+            
+            # フォールバックしてManualの値が返されることを確認
+            self.assertIsNotNone(swaps)
+            self.assertEqual(swaps["buy"], 100.0)
+            self.assertEqual(swaps["sell"], -110.0)
+            
+            # 存在しないペアはNoneが返る
+            self.assertIsNone(swap_provider.get_swap_points("EUR/USD"))
+
+    def test_swap_provider_fallback_with_legacy_settings(self) -> None:
+        """[P0] 古い設定形式(manual_swap_settings)でもManualにフォールバックするか検証"""
+        legacy_config = {
+            "manual_swap_settings": {
+                "overrides": {
+                    "USD/JPY": {"buy": 200.0, "sell": -220.0}
+                }
+            }
+        }
+        
+        with patch('src.adapters.swap_provider.HttpJsonSwapProvider.get_swap_points', return_value=None):
+            swap_provider = AggregatedSwapProvider(legacy_config)
+            swaps = swap_provider.get_swap_points("USD/JPY")
+            
+            self.assertIsNotNone(swaps)
+            self.assertEqual(swaps["buy"], 200.0, "Legacy config fallback failed for buy swap.")
+            self.assertEqual(swaps["sell"], -220.0, "Legacy config fallback failed for sell swap.")
 
     # ----------------------------------------------------------------
     # 2. ロット自動計算 & 安全丸め
